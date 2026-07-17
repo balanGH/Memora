@@ -29,6 +29,9 @@ export function thumbUrl(id: number): string {
 export function fileUrl(id: number): string {
   return `${baseUrl}/api/file/${id}`
 }
+export function personFaceUrl(personId: number): string {
+  return `${baseUrl}/api/people/${personId}/face`
+}
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${baseUrl}${path}`, {

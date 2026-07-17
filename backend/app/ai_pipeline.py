@@ -18,7 +18,6 @@ from .ai import get_ai
 from .ai.interfaces import cosine_similarity
 from .db import get_conn, transaction
 
-_CLUSTER_THRESHOLD = 0.92  # cosine similarity to treat two faces as same person
 _lock = threading.Lock()
 
 STATUS = {
@@ -40,7 +39,7 @@ def _unpack(blob: Optional[bytes]) -> list[float]:
     return list(struct.unpack(f"{n}f", blob))
 
 
-def _assign_person(conn, embedding: list[float]) -> int:
+def _assign_person(conn, embedding: list[float], threshold: float) -> int:
     """Find the closest existing person or create a new one."""
     rows = conn.execute(
         """
@@ -57,7 +56,7 @@ def _assign_person(conn, embedding: list[float]) -> int:
         if sim > best_sim:
             best_id, best_sim = row["person_id"], sim
 
-    if best_id is not None and best_sim >= _CLUSTER_THRESHOLD:
+    if best_id is not None and best_sim >= threshold:
         return best_id
 
     cur = conn.execute("INSERT INTO people(name) VALUES (NULL)")
@@ -69,7 +68,7 @@ def _process_one(conn, media_id: int, path: Path) -> None:
     result = ai.analyze(path)
 
     for face in result.faces:
-        person_id = _assign_person(conn, face.embedding)
+        person_id = _assign_person(conn, face.embedding, ai.face_match_threshold)
         conn.execute(
             """INSERT INTO faces(media_id, person_id, bbox_x, bbox_y, bbox_w,
                                  bbox_h, embedding)
