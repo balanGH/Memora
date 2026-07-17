@@ -1,0 +1,24 @@
+# Memora backend dependencies.
+# Lower-bounded (not pinned) so pip picks prebuilt wheels for your Python
+# version — pinning older releases forces slow, failure-prone source builds on
+# newer interpreters (e.g. Python 3.13/3.14).
+fastapi>=0.115
+uvicorn[standard]>=0.30
+Pillow>=11,<13
+python-multipart>=0.0.12
+
+# --- Optional: HEIC/HEIF support -------------------------------------------
+# pillow-heif has no prebuilt wheels on some newer Pythons and then needs a C
+# toolchain (MSYS2) to build. The code enables it automatically *if installed*,
+# so it is optional. Install it yourself when you want HEIC support:
+#   pip install pillow-heif
+# pillow-heif>=0.16
+
+# --- Real AI models (NOT installed for the stubbed vertical slice) ---
+# Uncomment and `pip install` these when swapping StubAI for real implementations.
+# insightface        # face detection + embeddings
+# onnxruntime        # runtime for insightface
+# ultralytics        # YOLO object detection
+# open-clip-torch    # CLIP image/text embeddings
+# paddleocr          # OCR
+# opencv-python      # image processing

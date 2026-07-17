@@ -1,0 +1,20 @@
+# Node / Electron
+node_modules/
+out/
+dist/
+*.log
+
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+
+# Local Memora data (created at runtime)
+backend/.memora*/
+.memora/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

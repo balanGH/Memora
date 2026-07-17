@@ -1,0 +1,37 @@
+"""Runtime configuration and on-disk data locations.
+
+Everything Memora stores lives under a single data directory in the user's
+home folder. Nothing ever leaves the machine.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+APP_NAME = "Memora"
+
+# Allow overriding the data dir (useful for tests / portable installs).
+DATA_DIR = Path(os.environ.get("MEMORA_DATA_DIR", Path.home() / ".memora"))
+THUMBNAIL_DIR = DATA_DIR / "thumbnails"
+DB_PATH = DATA_DIR / "memora.db"
+
+# Server
+HOST = os.environ.get("MEMORA_HOST", "127.0.0.1")
+PORT = int(os.environ.get("MEMORA_PORT", "8756"))
+
+# Media handling
+IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+    ".tif", ".tiff", ".heic", ".heif",
+}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+
+THUMBNAIL_SIZE = (400, 400)   # max box for grid thumbnails
+THUMBNAIL_QUALITY = 82
+
+
+def ensure_dirs() -> None:
+    """Create the data directories if they do not exist."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
