@@ -124,6 +124,42 @@ def thumb_filename(path: Path) -> str:
     return f"{digest}.webp"
 
 
+def crop_face(
+    path: Path,
+    bbox: tuple[float, float, float, float],
+    out_size: int = 256,
+    pad: float = 0.4,
+) -> Optional[bytes]:
+    """Crop a square face thumbnail from ``path`` given a normalized bbox.
+
+    ``bbox`` is (x, y, w, h) in 0..1. ``pad`` adds margin around the face so the
+    circular avatar isn't cropped too tight. Returns WEBP bytes, or None.
+    """
+    try:
+        with Image.open(path) as img:
+            img = ImageOps.exif_transpose(img).convert("RGB")
+            W, H = img.size
+            x, y, w, h = bbox
+            cx, cy = (x + w / 2) * W, (y + h / 2) * H
+            side = max(w * W, h * H) * (1 + pad)
+            half = side / 2
+            box = (
+                int(max(cx - half, 0)),
+                int(max(cy - half, 0)),
+                int(min(cx + half, W)),
+                int(min(cy + half, H)),
+            )
+            face = img.crop(box)
+            face.thumbnail((out_size, out_size), Image.Resampling.LANCZOS)
+            import io
+
+            buf = io.BytesIO()
+            face.save(buf, "WEBP", quality=85)
+            return buf.getvalue()
+    except Exception:
+        return None
+
+
 def generate_thumbnail(path: Path) -> Optional[str]:
     """Create a cached thumbnail; returns the thumbnail path or None on failure.
 

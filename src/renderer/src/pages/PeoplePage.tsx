@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Box, Typography, Avatar, Grid, Card, CardActionArea } from '@mui/material'
 import PersonIcon from '@mui/icons-material/Person'
-import { api, thumbUrl } from '../api/client'
+import { api, personFaceUrl, thumbUrl } from '../api/client'
 import type { Person } from '../api/types'
 
 export default function PeoplePage(): JSX.Element {
@@ -42,7 +42,17 @@ export default function PeoplePage(): JSX.Element {
                 sx={{ p: 2, textAlign: 'center' }}
               >
                 <Avatar
-                  src={p.cover_media_id ? thumbUrl(p.cover_media_id) : undefined}
+                  src={personFaceUrl(p.id)}
+                  imgProps={{
+                    // Fall back to the full-photo thumbnail if no face crop.
+                    onError: (e) => {
+                      const img = e.currentTarget
+                      if (p.cover_media_id && !img.dataset.fallback) {
+                        img.dataset.fallback = '1'
+                        img.src = thumbUrl(p.cover_media_id)
+                      }
+                    }
+                  }}
                   sx={{ width: 92, height: 92, mx: 'auto', mb: 1.5 }}
                 >
                   <PersonIcon sx={{ fontSize: 44 }} />

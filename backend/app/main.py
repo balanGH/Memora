@@ -8,7 +8,7 @@ from __future__ import annotations
 import mimetypes
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from . import ai_pipeline, repository, scanner
 from .config import HOST, PORT
 from .db import get_conn, init_db
+from .media_utils import crop_face
 
 app = FastAPI(title="Memora", version="0.1.0")
 
@@ -193,6 +194,32 @@ def post_merge(body: MergeIn) -> dict:
 @app.get("/api/people/{person_id}/media")
 def get_person_media(person_id: int) -> dict:
     return {"items": repository.media_for_person(person_id)}
+
+
+@app.get("/api/people/{person_id}/face")
+def get_person_face(person_id: int):
+    """Return a cropped face thumbnail for the person's cover face.
+
+    Falls back to a 404 (frontend then shows the generic avatar / photo thumb),
+    e.g. when faces have no bbox (stub backend produces boxes too, but real
+    InsightFace boxes make this look right).
+    """
+    row = get_conn().execute(
+        """SELECT m.path AS path, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h
+           FROM faces f JOIN media m ON m.id = f.media_id
+           WHERE f.person_id = ? AND f.bbox_w IS NOT NULL AND f.bbox_w > 0
+           ORDER BY (f.bbox_w * f.bbox_h) DESC LIMIT 1""",
+        (person_id,),
+    ).fetchone()
+    if not row or not Path(row["path"]).exists():
+        raise HTTPException(status_code=404, detail="No face crop available")
+    data = crop_face(
+        Path(row["path"]),
+        (row["bbox_x"], row["bbox_y"], row["bbox_w"], row["bbox_h"]),
+    )
+    if not data:
+        raise HTTPException(status_code=404, detail="Crop failed")
+    return Response(content=data, media_type="image/webp")
 
 
 # ------------------------------------------------------------- Search -------

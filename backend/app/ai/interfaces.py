@@ -68,6 +68,9 @@ class AIServices:
     tagging: TaggingService
     ocr: OCRService
     embeddings: EmbeddingService
+    # Cosine-similarity threshold above which two faces are the same person.
+    # Depends on the embedding space: stub uses ~0.92, InsightFace ~0.45.
+    face_match_threshold: float = 0.92
 
     def analyze(self, image_path: Path) -> AIResult:
         return AIResult(
