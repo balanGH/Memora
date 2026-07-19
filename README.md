@@ -6,8 +6,8 @@ No cloud, no telemetry, no tracking.
 
 > **Status: working app.** The end-to-end core runs today: add folders → scan → generate
 > thumbnails → browse a Google-Photos-style timeline → open the full-screen viewer (photos
-> **and video**, including HEIC). People, an offline **Places** map, Albums, Search, and
-> per-person **Export** (preserving folder structure) all work. Object/scene tagging, OCR,
+> **and video**, including HEIC). People, an interactive **Places** map, Albums, Search,
+> and per-person **Export** (preserving folder structure) all work. Object/scene tagging, OCR,
 > and CLIP-style search run on **deterministic stub models** so the app runs with zero
 > multi-GB downloads; **real InsightFace face recognition** is wired and flips on with one
 > env var. Swapping in real YOLO / CLIP / PaddleOCR later requires no changes to callers.
@@ -31,7 +31,8 @@ No cloud, no telemetry, no tracking.
 
 - **Frontend:** Electron + React + TypeScript + Material UI, bundled with `electron-vite`.
   Virtualized timeline via `react-virtuoso`, justified (masonry-style) rows, sticky date
-  headers, dark/light themes. Offline **Places** map (bundled GeoJSON, no online tiles).
+  headers, dark/light themes. Interactive **Places** map (Leaflet + OSM tiles) with a
+  timeline filmstrip synced to the map.
 - **Backend:** Python + FastAPI + SQLite (stdlib `sqlite3`, WAL mode). Pillow for EXIF,
   thumbnails, and HEIC→JPEG display renditions; optional ffmpeg for video.
 - **AI seam:** `backend/app/ai/interfaces.py` defines `Protocol`s for faces, tagging, OCR,
@@ -93,14 +94,24 @@ npm run backend:dev          # python backend/run.py
   ffmpeg, videos still play and show a placeholder tile (they stay queued for AI until
   ffmpeg is installed).
 
-## Places (offline map)
+## Places (interactive map)
 
-The **Places** tab plots photos that have GPS EXIF data on a real world map rendered
-entirely offline — country geometry is bundled as GeoJSON
-(`src/renderer/src/assets/countries.geo.json`) and drawn as SVG; **no online map tiles are
-ever requested**. Locations are clustered on a coarse lat/lon grid and colored by
-**intensity (photo count)** on a teal→red heat scale. Click a place to view its photos.
-Backend: `GET /api/places`, `GET /api/places/media?key=…`.
+The **Places** tab shows every photo with GPS EXIF data on a real, pannable/zoomable map
+(Leaflet + OpenStreetMap tiles) with a synchronized **timeline filmstrip**:
+
+- Scroll the filmstrip and the map **flies** to where each photo was taken.
+- Click a **map pin** to jump the timeline to that photo.
+- **Double-click** a filmstrip photo to open it full-screen.
+
+Backend: `GET /api/geo/media` returns all geotagged photos oldest-first (the timeline that
+drives the map). Photos need GPS EXIF (usually from a phone camera) to appear.
+
+> **Network note:** this is the **one feature that reaches the internet** — map tiles are
+> fetched from OpenStreetMap/CartoDB on demand, which discloses the *approximate* map area
+> you're viewing to those tile servers. Your photos, files, and metadata are never sent;
+> only tile requests for the visible region. Everything else in Memora stays fully offline.
+> (An earlier revision used a bundled offline SVG map with no tile requests — it can be
+> restored if you prefer zero network access.)
 
 ## Export people with folder structure
 
@@ -121,6 +132,10 @@ All state lives in **`~/.memora/`**:
 Your original photos are **never moved, modified, or uploaded** (Export explicitly *copies*
 to a folder you choose). Delete `~/.memora/` to reset the app completely. Override the
 location with the `MEMORA_DATA_DIR` env var.
+
+The **only** outbound network traffic is map-tile fetching in the **Places** tab
+(OpenStreetMap/CartoDB) — see the note above. Nothing else in the app makes network
+requests.
 
 ## Build
 
@@ -228,7 +243,7 @@ do. No caller changes.
 | Albums (manual) | ✅ Working |
 | People clustering, rename, hide, merge | ✅ Working (stub or real InsightFace) |
 | Real face recognition (InsightFace) + cropped-face avatars | ✅ Wired — enable via `MEMORA_FACE_BACKEND=insightface` |
-| Places — offline world map, heat-colored by photo count | ✅ Working |
+| Places — interactive Leaflet map + timeline filmstrip | ✅ Working (uses online map tiles) |
 | Export a person's photos preserving event folder structure | ✅ Working |
 | Search (people / object / scene / OCR / semantic) | ✅ Working (stub) |
 | Similar-image search | ✅ Working (stub) |

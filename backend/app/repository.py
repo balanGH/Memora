@@ -358,6 +358,21 @@ def list_places() -> list[dict]:
     return sorted(clusters.values(), key=lambda c: c["count"], reverse=True)
 
 
+def geotagged_media(limit: int = 5000) -> list[dict]:
+    """All geotagged photos, oldest first — the timeline that drives the map."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT id, filename, kind, width, height, taken_at, thumb_path,
+                  is_favorite, gps_lat, gps_lon
+           FROM media
+           WHERE gps_lat IS NOT NULL AND gps_lon IS NOT NULL AND is_trashed = 0
+           ORDER BY taken_at ASC, id ASC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [_media_dict(r) for r in rows]
+
+
 def media_for_place(key: str, limit: int = 500) -> list[dict]:
     conn = get_conn()
     rows = conn.execute(

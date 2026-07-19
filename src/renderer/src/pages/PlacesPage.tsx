@@ -1,182 +1,243 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Box, Typography, Chip, Link, Stack } from '@mui/material'
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { Box, Typography, Chip, Stack } from '@mui/material'
 import PublicIcon from '@mui/icons-material/Public'
-import PhotoGrid from '../components/PhotoGrid'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
 import PhotoViewer from '../components/PhotoViewer'
 import { api, thumbUrl } from '../api/client'
-import type { MediaItem, Place } from '../api/types'
-import { WORLD_LAND_PATH, heatColor } from '../components/worldMap'
+import type { MediaItem } from '../api/types'
 
-// Equirectangular projection: lon/lat -> SVG coords on a 360x180 canvas.
-const project = (lat: number, lon: number): [number, number] => [lon + 180, 90 - lat]
+const BASE_STYLE: L.CircleMarkerOptions = {
+  radius: 6,
+  color: '#ffffff',
+  weight: 1.5,
+  fillColor: '#1a73e8',
+  fillOpacity: 0.9
+}
+const ACTIVE_STYLE: L.CircleMarkerOptions = {
+  radius: 10,
+  color: '#ffffff',
+  weight: 2,
+  fillColor: '#ea4335',
+  fillOpacity: 1
+}
+
+function dateLabel(taken: string | null): string {
+  if (!taken) return ''
+  const d = new Date(taken)
+  return isNaN(d.getTime())
+    ? ''
+    : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+}
 
 export default function PlacesPage(): JSX.Element {
-  const [places, setPlaces] = useState<Place[]>([])
-  const [selected, setSelected] = useState<Place | null>(null)
+  const mapElRef = useRef<HTMLDivElement>(null)
+  const mapRef = useRef<L.Map | null>(null)
+  const markersRef = useRef<L.CircleMarker[]>([])
+  const stripRef = useRef<HTMLDivElement>(null)
+  const scrollRaf = useRef<number | null>(null)
+  const suppressScroll = useRef(false)
+
   const [items, setItems] = useState<MediaItem[]>([])
+  const [active, setActive] = useState(-1)
   const [viewerIndex, setViewerIndex] = useState<number | null>(null)
   const [loaded, setLoaded] = useState(false)
 
+  // --- init map once -------------------------------------------------------
+  useEffect(() => {
+    if (mapRef.current || !mapElRef.current) return
+    const map = L.map(mapElRef.current, { zoomControl: true, worldCopyJump: true }).setView(
+      [20, 0],
+      2
+    )
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map)
+    mapRef.current = map
+    // container starts at final size, but invalidate once to be safe
+    setTimeout(() => map.invalidateSize(), 100)
+    return () => {
+      map.remove()
+      mapRef.current = null
+    }
+  }, [])
+
+  // --- load geotagged photos + build markers -------------------------------
   useEffect(() => {
     api
-      .places()
-      .then((r) => {
-        setPlaces(r.places)
-        if (r.places.length) select(r.places[0])
-      })
+      .geoMedia()
+      .then((r) => setItems(r.items))
       .finally(() => setLoaded(true))
   }, [])
 
-  const select = (p: Place): void => {
-    setSelected(p)
-    api.placeMedia(p.key).then((r) => setItems(r.items))
-  }
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    markersRef.current.forEach((m) => m.remove())
+    markersRef.current = []
+    if (items.length === 0) return
 
-  const maxCount = useMemo(
-    () => places.reduce((m, p) => Math.max(m, p.count), 1),
-    [places]
+    const latlngs: L.LatLngExpression[] = []
+    items.forEach((item, i) => {
+      const marker = L.circleMarker([item.gps_lat!, item.gps_lon!], BASE_STYLE)
+        .addTo(map)
+        .on('click', () => selectItem(i, { fromMap: true }))
+      marker.bindTooltip(item.filename, { direction: 'top' })
+      markersRef.current.push(marker)
+      latlngs.push([item.gps_lat!, item.gps_lon!])
+    })
+    map.fitBounds(L.latLngBounds(latlngs).pad(0.2), { maxZoom: 12 })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items])
+
+  // --- selection drives both map and strip ---------------------------------
+  const selectItem = useCallback(
+    (i: number, opts: { fromMap?: boolean; fromScroll?: boolean } = {}) => {
+      setActive(i)
+      const map = mapRef.current
+      const item = items[i]
+      if (map && item) {
+        map.flyTo([item.gps_lat!, item.gps_lon!], Math.max(map.getZoom(), 14), {
+          duration: 0.6
+        })
+      }
+      // restyle markers
+      markersRef.current.forEach((m, idx) =>
+        m.setStyle(idx === i ? ACTIVE_STYLE : BASE_STYLE)
+      )
+      markersRef.current[i]?.bringToFront()
+      // scroll the strip to this item (unless the scroll itself triggered us)
+      if (!opts.fromScroll) {
+        suppressScroll.current = true
+        const el = stripRef.current?.children[i] as HTMLElement | undefined
+        el?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
+        setTimeout(() => (suppressScroll.current = false), 500)
+      }
+    },
+    [items]
   )
+
+  // --- scrolling the strip picks the centered photo ------------------------
+  const onStripScroll = useCallback(() => {
+    if (suppressScroll.current) return
+    if (scrollRaf.current) cancelAnimationFrame(scrollRaf.current)
+    scrollRaf.current = requestAnimationFrame(() => {
+      const strip = stripRef.current
+      if (!strip) return
+      const center = strip.scrollLeft + strip.clientWidth / 2
+      let best = -1
+      let bestDist = Infinity
+      Array.from(strip.children).forEach((child, i) => {
+        const el = child as HTMLElement
+        const c = el.offsetLeft + el.offsetWidth / 2
+        const dist = Math.abs(c - center)
+        if (dist < bestDist) {
+          bestDist = dist
+          best = i
+        }
+      })
+      if (best >= 0 && best !== active) selectItem(best, { fromScroll: true })
+    })
+  }, [active, selectItem])
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <Box sx={{ p: 3, pb: 1 }}>
+      <Box sx={{ px: 3, pt: 2, pb: 1 }}>
         <Stack direction="row" spacing={1} alignItems="center">
           <PublicIcon color="primary" />
           <Typography variant="h5" sx={{ fontWeight: 600 }}>
             Places
           </Typography>
+          {loaded && <Chip size="small" label={`${items.length} geotagged`} />}
         </Stack>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-          Photos with GPS location, grouped into places. Offline map — click a dot to see
-          those photos.
+          Scroll the timeline to fly the map to where each photo was taken. Click a map pin
+          to jump the timeline. Double-click a photo to open it.
         </Typography>
       </Box>
 
-      {/* Offline world map — height-capped so the photo grid below stays visible */}
-      <Box sx={{ px: 3, flexShrink: 0 }}>
-        <Box
-          sx={{
-            position: 'relative',
-            height: 'clamp(160px, 32vh, 280px)',
-            borderRadius: 3,
-            overflow: 'hidden',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            border: (t) => `1px solid ${t.palette.divider}`,
-            bgcolor: (t) => (t.palette.mode === 'dark' ? '#12161f' : '#eef3fb'),
-            color: (t) => (t.palette.mode === 'dark' ? '#5b6b86' : '#9fb2d0')
-          }}
-        >
-          <svg
-            viewBox="0 0 360 180"
-            preserveAspectRatio="xMidYMid meet"
-            style={{ width: '100%', height: '100%', display: 'block' }}
-          >
-            {/* ocean */}
-            <rect x={0} y={0} width={360} height={180} fill="currentColor" opacity={0.06} />
-            {/* real landmasses (bundled GeoJSON, drawn offline) */}
-            <path
-              d={WORLD_LAND_PATH}
-              fill="currentColor"
-              fillOpacity={0.24}
-              stroke="currentColor"
-              strokeOpacity={0.35}
-              strokeWidth={0.12}
-            />
-            {/* photo clusters — color + size by intensity (photo count) */}
-            {places.map((p) => {
-              const [x, y] = project(p.lat, p.lon)
-              const t = p.count / maxCount
-              const r = 1.4 + t * 4.5
-              const color = heatColor(t)
-              const isSel = selected?.key === p.key
-              return (
-                <g key={p.key} onClick={() => select(p)} style={{ cursor: 'pointer' }}>
-                  {/* soft heat glow */}
-                  <circle cx={x} cy={y} r={r * 2.4} fill={color} fillOpacity={0.18} />
-                  <circle
-                    cx={x}
-                    cy={y}
-                    r={r}
-                    fill={color}
-                    fillOpacity={0.95}
-                    stroke={isSel ? '#fff' : color}
-                    strokeWidth={isSel ? 0.9 : 0.3}
-                  />
-                </g>
-              )
-            })}
-          </svg>
-          {/* intensity legend */}
+      {/* Interactive map */}
+      <Box sx={{ flex: 1, minHeight: 0, position: 'relative', mx: 3, borderRadius: 3, overflow: 'hidden' }}>
+        <Box ref={mapElRef} sx={{ position: 'absolute', inset: 0 }} />
+        {loaded && items.length === 0 && (
           <Box
             sx={{
               position: 'absolute',
-              right: 12,
-              bottom: 10,
+              inset: 0,
               display: 'flex',
               alignItems: 'center',
-              gap: 0.75,
-              px: 1,
-              py: 0.5,
-              borderRadius: 2,
-              bgcolor: (t) => (t.palette.mode === 'dark' ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.7)')
+              justifyContent: 'center',
+              flexDirection: 'column',
+              bgcolor: 'background.default',
+              color: 'text.secondary',
+              zIndex: 500
             }}
           >
-            <Typography variant="caption" color="text.secondary">
-              Fewer
-            </Typography>
-            <Box
-              sx={{
-                width: 80,
-                height: 8,
-                borderRadius: 4,
-                background: `linear-gradient(90deg, ${heatColor(0)}, ${heatColor(0.5)}, ${heatColor(1)})`
-              }}
-            />
-            <Typography variant="caption" color="text.secondary">
-              More
+            <Typography variant="h6">No geotagged photos yet</Typography>
+            <Typography variant="body2">
+              Photos need GPS EXIF (usually from a phone camera) to appear on the map.
             </Typography>
           </Box>
-        </Box>
+        )}
       </Box>
 
-      {/* Selected place header */}
-      {selected && (
-        <Box sx={{ px: 3, py: 1.5, display: 'flex', alignItems: 'center', gap: 1.5 }}>
+      {/* Timeline filmstrip */}
+      <Box
+        ref={stripRef}
+        onScroll={onStripScroll}
+        sx={{
+          height: 132,
+          flexShrink: 0,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1,
+          px: 3,
+          py: 1.5,
+          overflowX: 'auto',
+          overflowY: 'hidden',
+          borderTop: (t) => `1px solid ${t.palette.divider}`,
+          scrollBehavior: 'smooth'
+        }}
+      >
+        {items.map((item, i) => (
           <Box
-            component="img"
-            src={thumbUrl(selected.cover_id)}
-            sx={{ width: 44, height: 44, borderRadius: 2, objectFit: 'cover' }}
-          />
-          <Box sx={{ flex: 1 }}>
-            <Typography sx={{ fontWeight: 600 }}>
-              {selected.lat.toFixed(3)}, {selected.lon.toFixed(3)}
-            </Typography>
-            <Link
-              href={`https://www.openstreetmap.org/?mlat=${selected.lat}&mlon=${selected.lon}#map=10/${selected.lat}/${selected.lon}`}
-              target="_blank"
-              rel="noreferrer"
-              variant="caption"
+            key={item.id}
+            onClick={() => selectItem(i)}
+            onDoubleClick={() => setViewerIndex(i)}
+            sx={{
+              flex: '0 0 auto',
+              width: 92,
+              cursor: 'pointer',
+              textAlign: 'center'
+            }}
+          >
+            <Box
+              sx={{
+                width: 92,
+                height: 72,
+                borderRadius: 2,
+                overflow: 'hidden',
+                border: (t) =>
+                  i === active
+                    ? `2px solid ${t.palette.error.main}`
+                    : `2px solid transparent`,
+                transition: 'transform 0.12s ease',
+                transform: i === active ? 'scale(1.04)' : 'none'
+              }}
             >
-              Open in OpenStreetMap
-            </Link>
-          </Box>
-          <Chip label={`${selected.count} photos`} size="small" />
-        </Box>
-      )}
-
-      <Box sx={{ flex: 1, minHeight: 0 }}>
-        {loaded && places.length === 0 ? (
-          <Box sx={{ p: 3, color: 'text.secondary' }}>
-            <Typography>No geotagged photos yet.</Typography>
-            <Typography variant="body2">
-              Photos need GPS EXIF data (usually from a phone camera) to appear here.
+              <img
+                src={thumbUrl(item.id)}
+                alt={item.filename}
+                loading="lazy"
+                style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+              />
+            </Box>
+            <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>
+              {dateLabel(item.taken_at)}
             </Typography>
           </Box>
-        ) : (
-          <PhotoGrid items={items} grouping="month" onOpen={setViewerIndex} />
-        )}
+        ))}
       </Box>
 
       {viewerIndex !== null && (

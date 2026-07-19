@@ -277,6 +277,11 @@ def get_place_media(key: str) -> dict:
     return {"items": repository.media_for_place(key)}
 
 
+@app.get("/api/geo/media")
+def get_geo_media() -> dict:
+    return {"items": repository.geotagged_media()}
+
+
 # ------------------------------------------------------------- Albums -------
 
 @app.get("/api/albums")

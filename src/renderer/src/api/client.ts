@@ -110,6 +110,7 @@ export const api = {
   places: () => req<{ places: Place[] }>('/api/places'),
   placeMedia: (key: string) =>
     req<{ items: MediaItem[] }>(`/api/places/media?key=${encodeURIComponent(key)}`),
+  geoMedia: () => req<{ items: MediaItem[] }>('/api/geo/media'),
 
   // export
   exportPerson: (personId: number, dest: string) =>
