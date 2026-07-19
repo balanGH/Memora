@@ -21,7 +21,7 @@ import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
 import ZoomInIcon from '@mui/icons-material/ZoomIn'
 import ZoomOutIcon from '@mui/icons-material/ZoomOut'
 import PlaceIcon from '@mui/icons-material/Place'
-import { api, fileUrl } from '../api/client'
+import { api, displayUrl, fileUrl } from '../api/client'
 import type { MediaItem, MediaDetail } from '../api/types'
 
 interface Props {
@@ -201,19 +201,28 @@ export default function PhotoViewer({
               justifyContent: 'center'
             }}
           >
-            <img
-              src={fileUrl(item.id)}
-              alt={item.filename}
-              draggable={false}
-              style={{
-                maxWidth: '100%',
-                maxHeight: '100%',
-                objectFit: 'contain',
-                transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-                transition: dragging.current ? 'none' : 'transform 0.15s ease',
-                cursor: zoom > 1 ? 'grab' : 'default'
-              }}
-            />
+            {item.kind === 'video' ? (
+              <video
+                src={fileUrl(item.id)}
+                controls
+                autoPlay
+                style={{ maxWidth: '100%', maxHeight: '100%', outline: 'none' }}
+              />
+            ) : (
+              <img
+                src={displayUrl(item.id)}
+                alt={item.filename}
+                draggable={false}
+                style={{
+                  maxWidth: '100%',
+                  maxHeight: '100%',
+                  objectFit: 'contain',
+                  transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                  transition: dragging.current ? 'none' : 'transform 0.15s ease',
+                  cursor: zoom > 1 ? 'grab' : 'default'
+                }}
+              />
+            )}
           </Box>
           {index < items.length - 1 && (
             <IconButton

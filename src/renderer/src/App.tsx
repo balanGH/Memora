@@ -9,6 +9,7 @@ import LibraryPage from './pages/LibraryPage'
 import PeoplePage from './pages/PeoplePage'
 import PersonPage from './pages/PersonPage'
 import SearchPage from './pages/SearchPage'
+import PlacesPage from './pages/PlacesPage'
 import AlbumsPage from './pages/AlbumsPage'
 import AlbumPage from './pages/AlbumPage'
 import SettingsPage from './pages/SettingsPage'
@@ -61,6 +62,7 @@ export default function App(): JSX.Element {
                 <Route path="/people" element={<PeoplePage />} />
                 <Route path="/people/:id" element={<PersonPage />} />
                 <Route path="/search" element={<SearchPage />} />
+                <Route path="/places" element={<PlacesPage />} />
                 <Route path="/albums" element={<AlbumsPage />} />
                 <Route path="/albums/:id" element={<AlbumPage />} />
                 <Route path="/settings" element={<SettingsPage />} />

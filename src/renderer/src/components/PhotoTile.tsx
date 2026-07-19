@@ -28,13 +28,28 @@ export default function PhotoTile({ item, width, height, onClick }: Props): JSX.
         '&:hover .memora-overlay': { opacity: 1 }
       }}
     >
-      <img
-        className="memora-tile-img"
-        src={thumbUrl(item.id)}
-        alt={item.filename}
-        loading="lazy"
-        style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-      />
+      {item.kind === 'video' && !item.thumb_path ? (
+        <Box
+          sx={{
+            width: '100%',
+            height: '100%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            bgcolor: (t) => (t.palette.mode === 'dark' ? '#22252c' : '#e8eaed')
+          }}
+        >
+          <PlayCircleIcon sx={{ fontSize: 40, opacity: 0.55 }} />
+        </Box>
+      ) : (
+        <img
+          className="memora-tile-img"
+          src={thumbUrl(item.id)}
+          alt={item.filename}
+          loading="lazy"
+          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+        />
+      )}
       <Box
         className="memora-overlay"
         sx={{

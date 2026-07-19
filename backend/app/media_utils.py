@@ -6,6 +6,9 @@ support is enabled opportunistically via pillow-heif when available.
 from __future__ import annotations
 
 import hashlib
+import shutil
+import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, TypedDict
@@ -13,7 +16,17 @@ from typing import Optional, TypedDict
 from PIL import Image, ImageOps
 from PIL.ExifTags import GPSTAGS, TAGS
 
-from .config import IMAGE_EXTENSIONS, THUMBNAIL_DIR, THUMBNAIL_QUALITY, THUMBNAIL_SIZE
+from .config import (
+    DISPLAY_DIR,
+    DISPLAY_QUALITY,
+    DISPLAY_SIZE,
+    IMAGE_EXTENSIONS,
+    THUMBNAIL_DIR,
+    THUMBNAIL_QUALITY,
+    THUMBNAIL_SIZE,
+    VIDEO_EXTENSIONS,
+    WEB_SAFE_IMAGE_EXTENSIONS,
+)
 
 # Enable HEIC/HEIF if the optional plugin is installed.
 try:  # pragma: no cover - depends on optional dep
@@ -36,6 +49,20 @@ class MediaMeta(TypedDict, total=False):
 
 def is_image(path: Path) -> bool:
     return path.suffix.lower() in IMAGE_EXTENSIONS
+
+
+def is_video(path: Path) -> bool:
+    return path.suffix.lower() in VIDEO_EXTENSIONS
+
+
+def is_web_safe(path: Path) -> bool:
+    """True if a browser <img> can render the file directly (no conversion)."""
+    return path.suffix.lower() in WEB_SAFE_IMAGE_EXTENSIONS
+
+
+def ffmpeg_path() -> Optional[str]:
+    """Locate ffmpeg on PATH (used for video thumbnails + frame sampling)."""
+    return shutil.which("ffmpeg")
 
 
 def _rational_to_float(value) -> float:
@@ -179,3 +206,85 @@ def generate_thumbnail(path: Path) -> Optional[str]:
         return str(out)
     except Exception:
         return None
+
+
+def display_filename(path: Path) -> str:
+    digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()
+    return f"{digest}.jpg"
+
+
+def generate_display(path: Path) -> Optional[str]:
+    """Return a browser-renderable JPEG for a non-web-safe image (HEIC/TIFF/...).
+
+    Cached under DISPLAY_DIR. Web-safe files don't need this — the caller serves
+    the original directly. Returns the JPEG path, or None on failure.
+    """
+    if not is_image(path):
+        return None
+    out = DISPLAY_DIR / display_filename(path)
+    if out.exists():
+        return str(out)
+    try:
+        with Image.open(path) as img:
+            img = ImageOps.exif_transpose(img).convert("RGB")
+            img.thumbnail(DISPLAY_SIZE, Image.Resampling.LANCZOS)
+            img.save(out, "JPEG", quality=DISPLAY_QUALITY, progressive=True)
+        return str(out)
+    except Exception:
+        return None
+
+
+def generate_video_thumbnail(path: Path) -> Optional[str]:
+    """Grab a representative frame from a video via ffmpeg and cache a thumbnail.
+
+    No-op (returns None) when ffmpeg isn't installed — the UI then shows a video
+    placeholder tile instead.
+    """
+    ff = ffmpeg_path()
+    if ff is None:
+        return None
+    out = THUMBNAIL_DIR / thumb_filename(path)
+    if out.exists():
+        return str(out)
+    tmp = out.with_suffix(".frame.jpg")
+    try:
+        # Seek ~1s in to skip black intro frames; scale to thumbnail width.
+        subprocess.run(
+            [ff, "-y", "-ss", "1", "-i", str(path), "-frames:v", "1",
+             "-vf", f"scale={THUMBNAIL_SIZE[0]}:-1", str(tmp)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+        )
+        if not tmp.exists():
+            return None
+        with Image.open(tmp) as img:
+            img = img.convert("RGB")
+            img.thumbnail(THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
+            img.save(out, "WEBP", quality=THUMBNAIL_QUALITY, method=4)
+        return str(out)
+    except Exception:
+        return None
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def extract_video_frames(path: Path, count: int = 8) -> list[Path]:
+    """Sample up to ``count`` frames evenly across a video for face detection.
+
+    Returns paths to temporary JPEG frames (caller deletes the parent dir).
+    Empty list if ffmpeg is missing or extraction fails.
+    """
+    ff = ffmpeg_path()
+    if ff is None:
+        return []
+    tmpdir = Path(tempfile.mkdtemp(prefix="memora_frames_"))
+    try:
+        # fps filter that yields roughly `count` frames regardless of length is
+        # hard without probing; sample 1 frame every 2s and cap at `count`.
+        subprocess.run(
+            [ff, "-y", "-i", str(path), "-vf", "fps=1/2",
+             "-frames:v", str(count), str(tmpdir / "f_%03d.jpg")],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120,
+        )
+        return sorted(tmpdir.glob("f_*.jpg"))
+    except Exception:
+        return []

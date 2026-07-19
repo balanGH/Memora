@@ -5,6 +5,8 @@ const api = {
   getBackendPort: (): Promise<number> => ipcRenderer.invoke('backend:port'),
   /** Open the native folder picker; returns selected absolute paths. */
   pickFolders: (): Promise<string[]> => ipcRenderer.invoke('dialog:pickFolder'),
+  /** Pick a single destination folder for export; null if cancelled. */
+  pickExportDir: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickExportDir'),
   /** OS-level dark/light preference at startup. */
   getSystemTheme: (): Promise<'dark' | 'light'> => ipcRenderer.invoke('theme:get')
 }

@@ -87,6 +87,14 @@ ipcMain.handle('dialog:pickFolder', async () => {
   return result.canceled ? [] : result.filePaths
 })
 
+ipcMain.handle('dialog:pickExportDir', async () => {
+  const result = await dialog.showOpenDialog(mainWindow!, {
+    title: 'Choose export destination',
+    properties: ['openDirectory', 'createDirectory']
+  })
+  return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+})
+
 ipcMain.handle('theme:get', () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'))
 
 // ---- App lifecycle --------------------------------------------------------

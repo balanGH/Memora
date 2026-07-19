@@ -79,5 +79,14 @@ export interface ScanState {
   ai: { running: boolean; processed: number; total: number }
 }
 
+export interface Place {
+  key: string
+  lat: number
+  lon: number
+  count: number
+  cover_id: number
+  latest: string | null
+}
+
 export type LibraryView = 'photos' | 'favorites' | 'archive' | 'hidden' | 'trash'
 export type SortKey = 'newest' | 'oldest' | 'favorites' | 'added'

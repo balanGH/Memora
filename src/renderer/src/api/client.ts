@@ -7,6 +7,7 @@ import type {
   MediaItem,
   MediaPage,
   Person,
+  Place,
   ScanState,
   SortKey
 } from './types'
@@ -28,6 +29,10 @@ export function thumbUrl(id: number): string {
 }
 export function fileUrl(id: number): string {
   return `${baseUrl}/api/file/${id}`
+}
+/** Browser-renderable image (converts HEIC/TIFF to JPEG server-side). */
+export function displayUrl(id: number): string {
+  return `${baseUrl}/api/display/${id}`
 }
 export function personFaceUrl(personId: number): string {
   return `${baseUrl}/api/people/${personId}/face`
@@ -100,6 +105,18 @@ export const api = {
   // search
   search: (q: string) =>
     req<{ query: string; items: MediaItem[] }>(`/api/search?q=${encodeURIComponent(q)}`),
+
+  // places
+  places: () => req<{ places: Place[] }>('/api/places'),
+  placeMedia: (key: string) =>
+    req<{ items: MediaItem[] }>(`/api/places/media?key=${encodeURIComponent(key)}`),
+
+  // export
+  exportPerson: (personId: number, dest: string) =>
+    req<{ exported: number; skipped: number; dest: string }>('/api/export/person', {
+      method: 'POST',
+      body: JSON.stringify({ person_id: personId, dest })
+    }),
 
   // albums
   albums: () => req<{ albums: Album[] }>('/api/albums'),
