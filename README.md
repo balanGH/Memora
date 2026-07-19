@@ -31,10 +31,11 @@ No cloud, no telemetry, no tracking.
 
 - **Frontend:** Electron + React + TypeScript + Material UI, bundled with `electron-vite`.
   Virtualized timeline via `react-virtuoso`, justified (masonry-style) rows, sticky date
-  headers, dark/light themes. Interactive **Places** map (Leaflet + OSM tiles) with a
-  timeline filmstrip synced to the map.
+  headers, dark/light themes. Interactive **Places** map (Leaflet) with a timeline filmstrip
+  synced to the map; tiles are served by the backend, so the renderer stays local-only.
 - **Backend:** Python + FastAPI + SQLite (stdlib `sqlite3`, WAL mode). Pillow for EXIF,
-  thumbnails, and HEIC→JPEG display renditions; optional ffmpeg for video.
+  thumbnails, and HEIC→JPEG display renditions; optional ffmpeg for video; an OSM tile
+  proxy with an on-disk cache for the Places map.
 - **AI seam:** `backend/app/ai/interfaces.py` defines `Protocol`s for faces, tagging, OCR,
   and embeddings. `stub.py` implements them deterministically; `real.py` provides the
   InsightFace-backed face service.
@@ -106,12 +107,17 @@ The **Places** tab shows every photo with GPS EXIF data on a real, pannable/zoom
 Backend: `GET /api/geo/media` returns all geotagged photos oldest-first (the timeline that
 drives the map). Photos need GPS EXIF (usually from a phone camera) to appear.
 
-> **Network note:** this is the **one feature that reaches the internet** — map tiles are
-> fetched from OpenStreetMap/CartoDB on demand, which discloses the *approximate* map area
-> you're viewing to those tile servers. Your photos, files, and metadata are never sent;
-> only tile requests for the visible region. Everything else in Memora stays fully offline.
-> (An earlier revision used a bundled offline SVG map with no tile requests — it can be
-> restored if you prefer zero network access.)
+**Tile caching (offline after first view).** The map never talks to the internet directly.
+Leaflet requests tiles from the local backend (`GET /api/tile/{z}/{x}/{y}`); on a cache
+miss the backend fetches that one tile from OpenStreetMap, stores it under
+`~/.memora/tiles/z/x/y.png`, and serves it. Revisiting an area — including fully offline and
+after a restart — is served from disk with no network access; an uncached tile while offline
+just shows blank. Manage/clear the cache in **Settings → Map cache** (`GET /api/tiles/stats`,
+`POST /api/tiles/clear`).
+
+> **Network note:** the **only** outbound traffic is the backend fetching map tiles on a
+> cache miss (with a descriptive User-Agent per OSM's tile policy). The renderer only ever
+> talks to `127.0.0.1`, and your photos, files, and metadata never leave the machine.
 
 ## Export people with folder structure
 
@@ -128,14 +134,15 @@ All state lives in **`~/.memora/`**:
 - `memora.db` — SQLite index (folders, media, faces, people, tags, albums)
 - `thumbnails/` — cached WebP thumbnails (images + video poster frames)
 - `display/` — cached JPEG renditions of HEIC/TIFF/… for the viewer
+- `tiles/` — cached OpenStreetMap tiles for the Places map (clear in Settings)
 
 Your original photos are **never moved, modified, or uploaded** (Export explicitly *copies*
 to a folder you choose). Delete `~/.memora/` to reset the app completely. Override the
 location with the `MEMORA_DATA_DIR` env var.
 
-The **only** outbound network traffic is map-tile fetching in the **Places** tab
-(OpenStreetMap/CartoDB) — see the note above. Nothing else in the app makes network
-requests.
+The **only** outbound network traffic is the backend fetching **map tiles** on a cache miss
+for the **Places** tab — see the note above. The renderer talks solely to `127.0.0.1`, and
+nothing else in the app makes network requests.
 
 ## Build
 
@@ -243,7 +250,8 @@ do. No caller changes.
 | Albums (manual) | ✅ Working |
 | People clustering, rename, hide, merge | ✅ Working (stub or real InsightFace) |
 | Real face recognition (InsightFace) + cropped-face avatars | ✅ Wired — enable via `MEMORA_FACE_BACKEND=insightface` |
-| Places — interactive Leaflet map + timeline filmstrip | ✅ Working (uses online map tiles) |
+| Places — interactive Leaflet map + timeline filmstrip | ✅ Working |
+| Map tiles proxied + cached on disk (offline after first view) | ✅ Working |
 | Export a person's photos preserving event folder structure | ✅ Working |
 | Search (people / object / scene / OCR / semantic) | ✅ Working (stub) |
 | Similar-image search | ✅ Working (stub) |

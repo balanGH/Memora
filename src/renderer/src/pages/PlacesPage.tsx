@@ -4,7 +4,7 @@ import PublicIcon from '@mui/icons-material/Public'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import PhotoViewer from '../components/PhotoViewer'
-import { api, thumbUrl } from '../api/client'
+import { api, thumbUrl, tileUrlTemplate } from '../api/client'
 import type { MediaItem } from '../api/types'
 
 const BASE_STYLE: L.CircleMarkerOptions = {
@@ -50,9 +50,14 @@ export default function PlacesPage(): JSX.Element {
       [20, 0],
       2
     )
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    // Tiles come from the local caching proxy — downloaded once, then served
+    // from disk (works offline on revisit). Blank tile shown when uncached +
+    // offline, instead of a broken image.
+    L.tileLayer(tileUrlTemplate(), {
       maxZoom: 19,
-      attribution: '© OpenStreetMap contributors'
+      attribution: '© OpenStreetMap contributors',
+      errorTileUrl:
+        'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="%23e8eaed"/></svg>'
     }).addTo(map)
     mapRef.current = map
     // container starts at final size, but invalidate once to be safe

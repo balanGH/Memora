@@ -15,6 +15,8 @@ DATA_DIR = Path(os.environ.get("MEMORA_DATA_DIR", Path.home() / ".memora"))
 THUMBNAIL_DIR = DATA_DIR / "thumbnails"
 # Web-safe JPEG renditions for formats browsers can't decode (HEIC, TIFF, ...).
 DISPLAY_DIR = DATA_DIR / "display"
+# Cached OpenStreetMap tiles for the Places map (downloaded once, reused offline).
+TILES_DIR = DATA_DIR / "tiles"
 DB_PATH = DATA_DIR / "memora.db"
 
 # Server
@@ -44,3 +46,4 @@ def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
     DISPLAY_DIR.mkdir(parents=True, exist_ok=True)
+    TILES_DIR.mkdir(parents=True, exist_ok=True)

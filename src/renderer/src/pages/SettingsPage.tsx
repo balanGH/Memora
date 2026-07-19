@@ -17,6 +17,8 @@ import FolderOpenIcon from '@mui/icons-material/FolderOpen'
 import RefreshIcon from '@mui/icons-material/Refresh'
 import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh'
 import LockIcon from '@mui/icons-material/Lock'
+import MapIcon from '@mui/icons-material/Map'
+import DeleteSweepIcon from '@mui/icons-material/DeleteSweep'
 import { api } from '../api/client'
 import { useScanStatus } from '../hooks/useScanStatus'
 import type { Folder } from '../api/types'
@@ -24,7 +26,20 @@ import type { Folder } from '../api/types'
 export default function SettingsPage(): JSX.Element {
   const [folders, setFolders] = useState<Folder[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [tileCache, setTileCache] = useState<{ tiles: number; bytes: number } | null>(null)
   const status = useScanStatus()
+
+  const loadTileStats = useCallback(() => {
+    api.tileStats().then(setTileCache).catch(() => setTileCache(null))
+  }, [])
+  useEffect(loadTileStats, [loadTileStats])
+
+  const clearTiles = async (): Promise<void> => {
+    await api.clearTiles()
+    loadTileStats()
+  }
+
+  const fmtMB = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(1)} MB`
 
   const loadFolders = useCallback(() => {
     api.folders().then((r) => setFolders(r.folders))
@@ -152,6 +167,40 @@ export default function SettingsPage(): JSX.Element {
           size="small"
           variant="outlined"
           label="AI models: stubbed (deterministic) — swap in InsightFace / YOLO / CLIP / PaddleOCR later"
+        />
+      </Paper>
+
+      {/* Map cache */}
+      <Paper variant="outlined" sx={{ p: 2.5, mb: 3, borderRadius: 3 }}>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+          <MapIcon color="primary" />
+          <Typography variant="h6" sx={{ flex: 1 }}>
+            Map cache
+          </Typography>
+          <Button
+            startIcon={<DeleteSweepIcon />}
+            variant="outlined"
+            size="small"
+            onClick={clearTiles}
+            disabled={!tileCache || tileCache.tiles === 0}
+          >
+            Clear
+          </Button>
+        </Stack>
+        <Typography variant="body2" color="text.secondary">
+          The Places map downloads OpenStreetMap tiles the first time you view an area and
+          caches them on disk, so revisiting works offline. Only map tiles are fetched — never
+          your photos.
+        </Typography>
+        <Chip
+          size="small"
+          variant="outlined"
+          sx={{ mt: 1.5 }}
+          label={
+            tileCache
+              ? `${tileCache.tiles} tiles cached · ${fmtMB(tileCache.bytes)}`
+              : 'Cache size unavailable'
+          }
         />
       </Paper>
 
