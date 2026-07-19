@@ -4,12 +4,13 @@ A modern, **fully offline** desktop photo-management app inspired by Google Phot
 Everything — your files, metadata, thumbnails, and AI results — stays on your machine.
 No cloud, no telemetry, no tracking.
 
-> **Status: working vertical slice.** The end-to-end core runs today: add folders →
-> scan → generate thumbnails → browse a Google-Photos-style timeline → open the
-> full-screen viewer. Face recognition, object/scene tagging, OCR, and CLIP-style
-> semantic search are wired through clean service interfaces backed by **deterministic
-> stub models**, so the whole app runs with zero multi-GB model downloads. Swapping in
-> real InsightFace / YOLO / CLIP / PaddleOCR later requires no changes to callers.
+> **Status: working app.** The end-to-end core runs today: add folders → scan → generate
+> thumbnails → browse a Google-Photos-style timeline → open the full-screen viewer (photos
+> **and video**, including HEIC). People, an interactive **Places** map, Albums, Search,
+> and per-person **Export** (preserving folder structure) all work. Object/scene tagging, OCR,
+> and CLIP-style search run on **deterministic stub models** so the app runs with zero
+> multi-GB downloads; **real InsightFace face recognition** is wired and flips on with one
+> env var. Swapping in real YOLO / CLIP / PaddleOCR later requires no changes to callers.
 
 ## Architecture
 
@@ -29,9 +30,10 @@ No cloud, no telemetry, no tracking.
 
 - **Frontend:** Electron + React + TypeScript + Material UI, bundled with `electron-vite`.
   Virtualized timeline via `react-virtuoso`, justified (masonry-style) rows, sticky date
-  headers, dark/light themes.
-- **Backend:** Python + FastAPI + SQLite (stdlib `sqlite3`, WAL mode). Pillow for EXIF and
-  thumbnails.
+  headers, dark/light themes. Interactive **Places** map (Leaflet + OSM tiles) with a
+  timeline filmstrip synced to the map.
+- **Backend:** Python + FastAPI + SQLite (stdlib `sqlite3`, WAL mode). Pillow for EXIF,
+  thumbnails, and HEIC→JPEG display renditions; optional ffmpeg for video.
 - **AI seam:** `backend/app/ai/interfaces.py` defines `Protocol`s for faces, tagging, OCR,
   and embeddings. `stub.py` implements them deterministically today.
 
@@ -76,6 +78,45 @@ npm run backend:dev          # python backend/run.py
 # API served at http://127.0.0.1:8756  (docs at /docs)
 ```
 
+## Media support
+
+- **HEIC / HEIF / TIFF / BMP** — browsers can't render these directly, so the viewer
+  requests `GET /api/display/{id}`, which serves the original for web-safe formats
+  (JPEG/PNG/WebP/GIF) and converts the rest to a cached JPEG. HEIC decoding needs
+  `pillow-heif` (`pip install pillow-heif`); thumbnails and display both use it.
+- **Video (.mp4/.mov/.mkv/.webm/…)** — plays in the full-screen viewer via a native
+  `<video>` element with range-request seeking. With **ffmpeg** on `PATH`, Memora also
+  extracts a poster-frame thumbnail and samples frames to detect faces in videos; without
+  ffmpeg, videos still play and show a placeholder tile (they stay queued for AI until
+  ffmpeg is installed).
+
+## Places (interactive map)
+
+The **Places** tab shows every photo with GPS EXIF data on a real, pannable/zoomable map
+(Leaflet + OpenStreetMap tiles) with a synchronized **timeline filmstrip**:
+
+- Scroll the filmstrip and the map **flies** to where each photo was taken.
+- Click a **map pin** to jump the timeline to that photo.
+- **Double-click** a filmstrip photo to open it full-screen.
+
+Backend: `GET /api/geo/media` returns all geotagged photos oldest-first (the timeline that
+drives the map). Photos need GPS EXIF (usually from a phone camera) to appear.
+
+> **Network note:** this is the **one feature that reaches the internet** — map tiles are
+> fetched from OpenStreetMap/CartoDB on demand, which discloses the *approximate* map area
+> you're viewing to those tile servers. Your photos, files, and metadata are never sent;
+> only tile requests for the visible region. Everything else in Memora stays fully offline.
+> (An earlier revision used a bundled offline SVG map with no tile requests — it can be
+> restored if you prefer zero network access.)
+
+## Export people with folder structure
+
+From a person's page, **Export** copies all of that person's photos to a destination you
+pick, **mirroring each photo's path relative to its library root** — so event subfolders
+are preserved. A person appearing in both `Events/college/IndustrialVisit` and
+`Events/college/Symposium` exports into *both* subfolders. Backend:
+`POST /api/export/person`.
+
 ## Data & privacy
 
 All state lives in **`~/.memora/`**:
@@ -83,8 +124,13 @@ All state lives in **`~/.memora/`**:
 - `memora.db` — SQLite index (folders, media, faces, people, tags, albums)
 - `thumbnails/` — cached WebP thumbnails
 
-Your original photos are **never moved, modified, or uploaded**. Delete `~/.memora/` to
-reset the app completely. Override the location with the `MEMORA_DATA_DIR` env var.
+Your original photos are **never moved, modified, or uploaded** (Export explicitly *copies*
+to a folder you choose). Delete `~/.memora/` to reset the app completely. Override the
+location with the `MEMORA_DATA_DIR` env var.
+
+The **only** outbound network traffic is map-tile fetching in the **Places** tab
+(OpenStreetMap/CartoDB) — see the note above. Nothing else in the app makes network
+requests.
 
 ## Build
 
@@ -189,6 +235,8 @@ do. No caller changes.
 | Albums (manual) | ✅ Working |
 | People clustering, rename, hide, merge | ✅ Working (stub or real InsightFace) |
 | Real face recognition (InsightFace) + cropped-face avatars | ✅ Wired — enable via `MEMORA_FACE_BACKEND=insightface` |
+| Places — interactive Leaflet map + timeline filmstrip | ✅ Working (uses online map tiles) |
+| Export a person's photos preserving event folder structure | ✅ Working |
 | Search (people / object / scene / OCR / semantic) | ✅ Working (stub) |
 | Similar-image search | ✅ Working (stub) |
 | Real YOLO / CLIP / PaddleOCR | 🔌 Interface ready, not wired |
