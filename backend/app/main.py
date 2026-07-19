@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from . import ai_pipeline, repository, scanner
+from . import ai_pipeline, repository, scanner, tiles
 from .config import HOST, PORT
 from .db import get_conn, init_db
 from .media_utils import crop_face, generate_display, is_web_safe
@@ -280,6 +280,31 @@ def get_place_media(key: str) -> dict:
 @app.get("/api/geo/media")
 def get_geo_media() -> dict:
     return {"items": repository.geotagged_media()}
+
+
+# --------------------------------------------------------- Map tiles --------
+
+@app.get("/api/tile/{z}/{x}/{y}")
+def get_tile(z: int, x: int, y: int):
+    """Cached OSM tile. 404 when offline and not yet cached (blank tile)."""
+    data = tiles.get_tile(z, x, y)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Tile unavailable offline")
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
+
+
+@app.get("/api/tiles/stats")
+def get_tiles_stats() -> dict:
+    return tiles.cache_stats()
+
+
+@app.post("/api/tiles/clear")
+def post_tiles_clear() -> dict:
+    return {"cleared": tiles.clear_cache()}
 
 
 # ------------------------------------------------------------- Albums -------

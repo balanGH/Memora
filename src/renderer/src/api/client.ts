@@ -37,6 +37,10 @@ export function displayUrl(id: number): string {
 export function personFaceUrl(personId: number): string {
   return `${baseUrl}/api/people/${personId}/face`
 }
+/** Leaflet tile template routed through the local caching proxy. */
+export function tileUrlTemplate(): string {
+  return `${baseUrl}/api/tile/{z}/{x}/{y}`
+}
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${baseUrl}${path}`, {
@@ -111,6 +115,11 @@ export const api = {
   placeMedia: (key: string) =>
     req<{ items: MediaItem[] }>(`/api/places/media?key=${encodeURIComponent(key)}`),
   geoMedia: () => req<{ items: MediaItem[] }>('/api/geo/media'),
+  tileStats: () => req<{ tiles: number; bytes: number }>('/api/tiles/stats'),
+  clearTiles: () =>
+    req<{ cleared: { tiles: number; bytes: number } }>('/api/tiles/clear', {
+      method: 'POST'
+    }),
 
   // export
   exportPerson: (personId: number, dest: string) =>
