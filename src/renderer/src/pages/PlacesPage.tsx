@@ -5,6 +5,7 @@ import PhotoGrid from '../components/PhotoGrid'
 import PhotoViewer from '../components/PhotoViewer'
 import { api, thumbUrl } from '../api/client'
 import type { MediaItem, Place } from '../api/types'
+import { WORLD_LAND_PATH, heatColor } from '../components/worldMap'
 
 // Equirectangular projection: lon/lat -> SVG coords on a 360x180 canvas.
 const project = (lat: number, lon: number): [number, number] => [lon + 180, 90 - lat]
@@ -35,20 +36,6 @@ export default function PlacesPage(): JSX.Element {
     () => places.reduce((m, p) => Math.max(m, p.count), 1),
     [places]
   )
-  const graticule = useMemo(() => {
-    const lines: JSX.Element[] = []
-    for (let lon = -180; lon <= 180; lon += 30)
-      lines.push(
-        <line key={`v${lon}`} x1={lon + 180} y1={0} x2={lon + 180} y2={180}
-          stroke="currentColor" strokeWidth={0.2} opacity={0.25} />
-      )
-    for (let lat = -90; lat <= 90; lat += 30)
-      lines.push(
-        <line key={`h${lat}`} x1={0} y1={90 - lat} x2={360} y2={90 - lat}
-          stroke="currentColor" strokeWidth={0.2} opacity={0.25} />
-      )
-    return lines
-  }, [])
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -65,43 +52,92 @@ export default function PlacesPage(): JSX.Element {
         </Typography>
       </Box>
 
-      {/* Offline world map */}
-      <Box sx={{ px: 3 }}>
+      {/* Offline world map — height-capped so the photo grid below stays visible */}
+      <Box sx={{ px: 3, flexShrink: 0 }}>
         <Box
           sx={{
             position: 'relative',
+            height: 'clamp(160px, 32vh, 280px)',
             borderRadius: 3,
             overflow: 'hidden',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
             border: (t) => `1px solid ${t.palette.divider}`,
             bgcolor: (t) => (t.palette.mode === 'dark' ? '#12161f' : '#eef3fb'),
             color: (t) => (t.palette.mode === 'dark' ? '#5b6b86' : '#9fb2d0')
           }}
         >
-          <svg viewBox="0 0 360 180" style={{ width: '100%', display: 'block' }}>
-            {graticule}
-            {/* equator + prime meridian emphasized */}
-            <line x1={0} y1={90} x2={360} y2={90} stroke="currentColor" strokeWidth={0.4} opacity={0.5} />
-            <line x1={180} y1={0} x2={180} y2={180} stroke="currentColor" strokeWidth={0.4} opacity={0.5} />
+          <svg
+            viewBox="0 0 360 180"
+            preserveAspectRatio="xMidYMid meet"
+            style={{ width: '100%', height: '100%', display: 'block' }}
+          >
+            {/* ocean */}
+            <rect x={0} y={0} width={360} height={180} fill="currentColor" opacity={0.06} />
+            {/* real landmasses (bundled GeoJSON, drawn offline) */}
+            <path
+              d={WORLD_LAND_PATH}
+              fill="currentColor"
+              fillOpacity={0.24}
+              stroke="currentColor"
+              strokeOpacity={0.35}
+              strokeWidth={0.12}
+            />
+            {/* photo clusters — color + size by intensity (photo count) */}
             {places.map((p) => {
               const [x, y] = project(p.lat, p.lon)
-              const r = 1.5 + (p.count / maxCount) * 5
+              const t = p.count / maxCount
+              const r = 1.4 + t * 4.5
+              const color = heatColor(t)
               const isSel = selected?.key === p.key
               return (
-                <circle
-                  key={p.key}
-                  cx={x}
-                  cy={y}
-                  r={r}
-                  onClick={() => select(p)}
-                  style={{ cursor: 'pointer' }}
-                  fill={isSel ? '#ea4335' : '#1a73e8'}
-                  fillOpacity={0.85}
-                  stroke="#fff"
-                  strokeWidth={0.3}
-                />
+                <g key={p.key} onClick={() => select(p)} style={{ cursor: 'pointer' }}>
+                  {/* soft heat glow */}
+                  <circle cx={x} cy={y} r={r * 2.4} fill={color} fillOpacity={0.18} />
+                  <circle
+                    cx={x}
+                    cy={y}
+                    r={r}
+                    fill={color}
+                    fillOpacity={0.95}
+                    stroke={isSel ? '#fff' : color}
+                    strokeWidth={isSel ? 0.9 : 0.3}
+                  />
+                </g>
               )
             })}
           </svg>
+          {/* intensity legend */}
+          <Box
+            sx={{
+              position: 'absolute',
+              right: 12,
+              bottom: 10,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 0.75,
+              px: 1,
+              py: 0.5,
+              borderRadius: 2,
+              bgcolor: (t) => (t.palette.mode === 'dark' ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.7)')
+            }}
+          >
+            <Typography variant="caption" color="text.secondary">
+              Fewer
+            </Typography>
+            <Box
+              sx={{
+                width: 80,
+                height: 8,
+                borderRadius: 4,
+                background: `linear-gradient(90deg, ${heatColor(0)}, ${heatColor(0.5)}, ${heatColor(1)})`
+              }}
+            />
+            <Typography variant="caption" color="text.secondary">
+              More
+            </Typography>
+          </Box>
         </Box>
       </Box>
 
