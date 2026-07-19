@@ -14,7 +14,7 @@ from typing import Optional
 
 from .config import IMAGE_EXTENSIONS, MEDIA_EXTENSIONS
 from .db import get_conn, transaction
-from .media_utils import extract_metadata, generate_thumbnail
+from .media_utils import extract_metadata, generate_thumbnail, generate_video_thumbnail
 
 
 @dataclass
@@ -90,7 +90,11 @@ def _index_file(conn, folder_id: int, path: Path) -> bool:
         size = None
 
     meta = extract_metadata(path) if kind == "image" else {}
-    thumb = generate_thumbnail(path) if kind == "image" else None
+    thumb = (
+        generate_thumbnail(path)
+        if kind == "image"
+        else generate_video_thumbnail(path)
+    )
 
     conn.execute(
         """

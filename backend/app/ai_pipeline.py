@@ -8,6 +8,7 @@ in behind ``app.ai`` without touching this orchestration.
 from __future__ import annotations
 
 import json
+import shutil
 import struct
 import threading
 from datetime import datetime
@@ -63,60 +64,120 @@ def _assign_person(conn, embedding: list[float], threshold: float) -> int:
     return cur.lastrowid
 
 
-def _process_one(conn, media_id: int, path: Path) -> None:
-    ai = get_ai()
-    result = ai.analyze(path)
+def _persist_face(conn, media_id: int, face, threshold: float) -> None:
+    person_id = _assign_person(conn, face.embedding, threshold)
+    conn.execute(
+        """INSERT INTO faces(media_id, person_id, bbox_x, bbox_y, bbox_w,
+                             bbox_h, embedding)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (media_id, person_id, face.bbox.x, face.bbox.y, face.bbox.w,
+         face.bbox.h, _pack(face.embedding)),
+    )
+    conn.execute(
+        "UPDATE people SET cover_media_id = ? WHERE id = ? AND cover_media_id IS NULL",
+        (media_id, person_id),
+    )
 
-    for face in result.faces:
-        person_id = _assign_person(conn, face.embedding, ai.face_match_threshold)
-        conn.execute(
-            """INSERT INTO faces(media_id, person_id, bbox_x, bbox_y, bbox_w,
-                                 bbox_h, embedding)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (media_id, person_id, face.bbox.x, face.bbox.y, face.bbox.w,
-             face.bbox.h, _pack(face.embedding)),
-        )
-        # give the person a cover photo if it lacks one
-        conn.execute(
-            "UPDATE people SET cover_media_id = ? WHERE id = ? AND cover_media_id IS NULL",
-            (media_id, person_id),
-        )
 
-    for tag in result.tags:
+def _persist_tags(conn, media_id: int, tags, ocr_text: str, embedding) -> None:
+    for tag in tags:
         conn.execute(
             "INSERT INTO tags(media_id, kind, label, confidence) VALUES (?, ?, ?, ?)",
             (media_id, tag.kind, tag.label, tag.confidence),
         )
-
-    if result.ocr_text:
+    if ocr_text:
         conn.execute(
             "INSERT INTO tags(media_id, kind, label, confidence) VALUES (?, 'ocr', ?, 1.0)",
-            (media_id, result.ocr_text),
+            (media_id, ocr_text),
         )
-
-    conn.execute(
-        "UPDATE media SET ai_processed = 1 WHERE id = ?", (media_id,)
-    )
-    # store CLIP embedding on the media row via a tag-free side table would be
-    # cleaner; for the slice we keep it in a JSON tag for simplicity.
     conn.execute(
         "INSERT INTO tags(media_id, kind, label, confidence) VALUES (?, 'embedding', ?, 1.0)",
-        (media_id, json.dumps(result.clip_embedding)),
+        (media_id, json.dumps(embedding)),
     )
+
+
+def _dedupe_faces(faces, threshold: float):
+    """Collapse near-duplicate faces (same person across video frames)."""
+    kept = []
+    for f in faces:
+        if any(
+            cosine_similarity(f.embedding, k.embedding) >= threshold for k in kept
+        ):
+            continue
+        kept.append(f)
+    return kept
+
+
+def _process_image(conn, media_id: int, path: Path) -> None:
+    ai = get_ai()
+    result = ai.analyze(path)
+    for face in result.faces:
+        _persist_face(conn, media_id, face, ai.face_match_threshold)
+    _persist_tags(conn, media_id, result.tags, result.ocr_text, result.clip_embedding)
+
+
+def _process_video(conn, media_id: int, path: Path) -> None:
+    """Sample frames, detect+dedupe faces across them, tag a representative frame."""
+    from .media_utils import extract_video_frames
+
+    ai = get_ai()
+    frames = extract_video_frames(path)
+    if not frames:
+        # ffmpeg missing / extraction failed — nothing to analyze.
+        _persist_tags(conn, media_id, [], "", [])
+        return
+
+    all_faces = []
+    for frame in frames:
+        try:
+            all_faces.extend(ai.faces.detect(frame))
+        except Exception:
+            pass
+    for face in _dedupe_faces(all_faces, ai.face_match_threshold):
+        _persist_face(conn, media_id, face, ai.face_match_threshold)
+
+    # Tags + semantic embedding from the middle frame.
+    mid = frames[len(frames) // 2]
+    tags = ai.tagging.tag(mid)
+    embedding = ai.embeddings.embed_image(mid)
+    _persist_tags(conn, media_id, tags, "", embedding)
+
+    # clean up temp frames
+    try:
+        shutil.rmtree(frames[0].parent, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _process_one(conn, media_id: int, path: Path, kind: str) -> None:
+    if kind == "video":
+        _process_video(conn, media_id, path)
+    else:
+        _process_image(conn, media_id, path)
+    conn.execute("UPDATE media SET ai_processed = 1 WHERE id = ?", (media_id,))
 
 
 def _worker() -> None:
+    from .media_utils import ffmpeg_path
+
     conn = get_conn()
-    pending = conn.execute(
-        "SELECT id, path FROM media WHERE ai_processed = 0 AND kind = 'image'"
-    ).fetchall()
+    # Always process images. Only queue videos when ffmpeg is available, so they
+    # stay pending (not marked done-with-nothing) until you install ffmpeg.
+    if ffmpeg_path():
+        pending = conn.execute(
+            "SELECT id, path, kind FROM media WHERE ai_processed = 0"
+        ).fetchall()
+    else:
+        pending = conn.execute(
+            "SELECT id, path, kind FROM media WHERE ai_processed = 0 AND kind = 'image'"
+        ).fetchall()
 
     STATUS.update(running=True, processed=0, total=len(pending), finished_at=None)
     try:
         for row in pending:
             try:
                 with transaction() as tconn:
-                    _process_one(tconn, row["id"], Path(row["path"]))
+                    _process_one(tconn, row["id"], Path(row["path"]), row["kind"])
             except Exception:
                 pass
             STATUS["processed"] += 1

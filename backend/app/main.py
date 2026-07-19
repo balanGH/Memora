@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from . import ai_pipeline, repository, scanner
 from .config import HOST, PORT
 from .db import get_conn, init_db
-from .media_utils import crop_face
+from .media_utils import crop_face, generate_display, is_web_safe
 
 app = FastAPI(title="Memora", version="0.1.0")
 
@@ -150,7 +150,30 @@ def get_file(media_id: int):
     if not row or not Path(row["path"]).exists():
         raise HTTPException(status_code=404, detail="File missing")
     mime, _ = mimetypes.guess_type(row["path"])
+    # FileResponse honors HTTP Range requests, so <video> seeking works.
     return FileResponse(row["path"], media_type=mime or "application/octet-stream")
+
+
+@app.get("/api/display/{media_id}")
+def get_display(media_id: int):
+    """Browser-renderable image for the viewer.
+
+    Serves the original for web-safe formats (JPEG/PNG/…); converts HEIC/TIFF/…
+    to a cached JPEG so Chromium can actually display them.
+    """
+    row = get_conn().execute(
+        "SELECT path, kind FROM media WHERE id = ?", (media_id,)
+    ).fetchone()
+    if not row or not Path(row["path"]).exists():
+        raise HTTPException(status_code=404, detail="File missing")
+    path = Path(row["path"])
+    if row["kind"] != "image" or is_web_safe(path):
+        mime, _ = mimetypes.guess_type(str(path))
+        return FileResponse(str(path), media_type=mime or "application/octet-stream")
+    jpeg = generate_display(path)
+    if not jpeg:
+        raise HTTPException(status_code=415, detail="Cannot render this image")
+    return FileResponse(jpeg, media_type="image/jpeg")
 
 
 # ------------------------------------------------------------- People -------
@@ -196,6 +219,19 @@ def get_person_media(person_id: int) -> dict:
     return {"items": repository.media_for_person(person_id)}
 
 
+class ExportPersonIn(BaseModel):
+    person_id: int
+    dest: str
+
+
+@app.post("/api/export/person")
+def post_export_person(body: ExportPersonIn) -> dict:
+    try:
+        return repository.export_person(body.person_id, body.dest)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/api/people/{person_id}/face")
 def get_person_face(person_id: int):
     """Return a cropped face thumbnail for the person's cover face.
@@ -227,6 +263,18 @@ def get_person_face(person_id: int):
 @app.get("/api/search")
 def get_search(q: str, limit: int = 200) -> dict:
     return repository.search(q, limit=limit)
+
+
+# ------------------------------------------------------------- Places -------
+
+@app.get("/api/places")
+def get_places() -> dict:
+    return {"places": repository.list_places()}
+
+
+@app.get("/api/places/media")
+def get_place_media(key: str) -> dict:
+    return {"items": repository.media_for_place(key)}
 
 
 # ------------------------------------------------------------- Albums -------

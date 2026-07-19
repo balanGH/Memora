@@ -6,10 +6,14 @@ import {
   TextField,
   Button,
   Stack,
-  Tooltip
+  Tooltip,
+  Snackbar,
+  Alert,
+  CircularProgress
 } from '@mui/material'
 import ArrowBackIcon from '@mui/icons-material/ArrowBack'
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff'
+import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove'
 import PhotoGrid from '../components/PhotoGrid'
 import PhotoViewer from '../components/PhotoViewer'
 import { api } from '../api/client'
@@ -22,6 +26,8 @@ export default function PersonPage(): JSX.Element {
   const [items, setItems] = useState<MediaItem[]>([])
   const [name, setName] = useState('')
   const [viewerIndex, setViewerIndex] = useState<number | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null)
 
   const load = useCallback(() => {
     api.personMedia(personId).then((r) => setItems(r.items))
@@ -41,6 +47,25 @@ export default function PersonPage(): JSX.Element {
   const hide = async (): Promise<void> => {
     await api.hidePerson(personId, true)
     navigate('/people')
+  }
+
+  const exportPhotos = async (): Promise<void> => {
+    const dest = await window.memora?.pickExportDir()
+    if (!dest) return
+    setExporting(true)
+    try {
+      const r = await api.exportPerson(personId, dest)
+      setToast({
+        msg: `Exported ${r.exported} photo${r.exported === 1 ? '' : 's'} to ${r.dest}${
+          r.skipped ? ` (${r.skipped} skipped)` : ''
+        }`,
+        ok: true
+      })
+    } catch (e) {
+      setToast({ msg: `Export failed: ${e}`, ok: false })
+    } finally {
+      setExporting(false)
+    }
   }
 
   return (
@@ -71,6 +96,17 @@ export default function PersonPage(): JSX.Element {
             Save
           </Button>
         </Stack>
+        <Button
+          onClick={exportPhotos}
+          disabled={exporting}
+          variant="outlined"
+          size="small"
+          startIcon={
+            exporting ? <CircularProgress size={16} /> : <DriveFileMoveIcon />
+          }
+        >
+          {exporting ? 'Exporting…' : 'Export'}
+        </Button>
         <Tooltip title="Hide this person">
           <IconButton onClick={hide}>
             <VisibilityOffIcon />
@@ -89,6 +125,18 @@ export default function PersonPage(): JSX.Element {
           onMutate={load}
         />
       )}
+      <Snackbar
+        open={!!toast}
+        autoHideDuration={6000}
+        onClose={() => setToast(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        {toast ? (
+          <Alert severity={toast.ok ? 'success' : 'error'} onClose={() => setToast(null)}>
+            {toast.msg}
+          </Alert>
+        ) : undefined}
+      </Snackbar>
     </Box>
   )
 }

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+from pathlib import Path
 from typing import Literal, Optional
 
 from .ai import get_ai
@@ -316,6 +318,112 @@ def album_media(album_id: int) -> list[dict]:
         (album_id,),
     ).fetchall()
     return [_media_dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------- Places ----
+
+# Grid size in degrees for grouping geotagged photos into "places" (~11 km).
+_PLACE_PRECISION = 1
+
+
+def _place_key(lat: float, lon: float) -> str:
+    return f"{round(lat, _PLACE_PRECISION)}_{round(lon, _PLACE_PRECISION)}"
+
+
+def list_places() -> list[dict]:
+    """Cluster geotagged media into places on a coarse lat/lon grid."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT id, thumb_path, gps_lat, gps_lon, taken_at
+           FROM media
+           WHERE gps_lat IS NOT NULL AND gps_lon IS NOT NULL AND is_trashed = 0
+           ORDER BY taken_at DESC"""
+    ).fetchall()
+
+    clusters: dict[str, dict] = {}
+    for r in rows:
+        key = _place_key(r["gps_lat"], r["gps_lon"])
+        c = clusters.get(key)
+        if c is None:
+            clusters[key] = {
+                "key": key,
+                "lat": r["gps_lat"],
+                "lon": r["gps_lon"],
+                "count": 1,
+                "cover_id": r["id"],
+                "latest": r["taken_at"],
+            }
+        else:
+            c["count"] += 1
+    return sorted(clusters.values(), key=lambda c: c["count"], reverse=True)
+
+
+def media_for_place(key: str, limit: int = 500) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT id, filename, kind, width, height, taken_at, thumb_path,
+                  is_favorite, gps_lat, gps_lon
+           FROM media
+           WHERE gps_lat IS NOT NULL AND gps_lon IS NOT NULL AND is_trashed = 0
+           ORDER BY taken_at DESC"""
+    ).fetchall()
+    matched = [
+        _media_dict(r)
+        for r in rows
+        if _place_key(r["gps_lat"], r["gps_lon"]) == key
+    ]
+    return matched[:limit]
+
+
+# ---------------------------------------------------------------- Export ----
+
+def export_person(person_id: int, dest: str) -> dict:
+    """Copy all of a person's photos to ``dest``, mirroring their original
+    folder structure relative to each photo's library root.
+
+    Example: a library folder ``.../all_photos`` containing
+    ``Events/college/IndustrialVisit/x.jpg`` and ``Events/college/Symposium/y.jpg``
+    both featuring the same person exports to::
+
+        dest/Events/college/IndustrialVisit/x.jpg
+        dest/Events/college/Symposium/y.jpg
+
+    so the person's appearances are preserved under each event folder.
+    """
+    conn = get_conn()
+    dest_root = Path(dest).expanduser()
+    if not dest_root.exists():
+        dest_root.mkdir(parents=True, exist_ok=True)
+
+    rows = conn.execute(
+        """SELECT DISTINCT m.path AS path, fo.path AS root
+           FROM media m
+           JOIN faces f ON f.media_id = m.id
+           LEFT JOIN folders fo ON fo.id = m.folder_id
+           WHERE f.person_id = ? AND m.is_trashed = 0""",
+        (person_id,),
+    ).fetchall()
+
+    exported, skipped = 0, 0
+    for r in rows:
+        src = Path(r["path"])
+        if not src.exists():
+            skipped += 1
+            continue
+        # Path relative to the library root preserves the event subfolders.
+        try:
+            rel = src.relative_to(Path(r["root"])) if r["root"] else Path(src.name)
+        except ValueError:
+            rel = Path(src.name)
+        target = dest_root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(src, target)
+            exported += 1
+        except Exception:
+            skipped += 1
+
+    return {"exported": exported, "skipped": skipped, "dest": str(dest_root)}
 
 
 def library_stats() -> dict:
