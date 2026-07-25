@@ -20,6 +20,14 @@ from .media_utils import crop_face, generate_display, is_web_safe
 
 app = FastAPI(title="Memora", version="0.1.0")
 
+# Media bytes are addressed by numeric media id (/api/thumb/{id}, /api/display/{id}).
+# Because ids are reused when the library is rescanned/rebuilt, the same URL can
+# point to a different file over time. Without this header Chromium heuristically
+# caches the old image and shows a thumbnail that no longer matches the original.
+# "no-cache" forces revalidation on every request; FileResponse's ETag/Last-Modified
+# make that a cheap 304 when the file is unchanged.
+_REVALIDATE = {"Cache-Control": "no-cache"}
+
 # The renderer runs on a vite dev-server origin in dev and file:// in prod.
 app.add_middleware(
     CORSMiddleware,
@@ -126,6 +134,24 @@ def get_similar(media_id: int) -> dict:
     return {"items": repository.similar_media(media_id)}
 
 
+class TagIn(BaseModel):
+    label: str
+
+
+@app.post("/api/media/{media_id}/tags")
+def post_tag(media_id: int, body: TagIn) -> dict:
+    try:
+        tag = repository.add_tag(media_id, body.label)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"tag": tag}
+
+
+@app.delete("/api/media/{media_id}/tags/{tag_id}")
+def delete_tag(media_id: int, tag_id: int) -> dict:
+    return {"ok": repository.delete_tag(media_id, tag_id)}
+
+
 @app.get("/api/thumb/{media_id}")
 def get_thumb(media_id: int):
     row = get_conn().execute(
@@ -135,10 +161,10 @@ def get_thumb(media_id: int):
         raise HTTPException(status_code=404, detail="Not found")
     thumb = row["thumb_path"]
     if thumb and Path(thumb).exists():
-        return FileResponse(thumb, media_type="image/webp")
+        return FileResponse(thumb, media_type="image/webp", headers=_REVALIDATE)
     # fall back to original if thumbnail is missing
     if row["path"] and Path(row["path"]).exists():
-        return FileResponse(row["path"])
+        return FileResponse(row["path"], headers=_REVALIDATE)
     raise HTTPException(status_code=404, detail="File missing")
 
 
@@ -151,7 +177,9 @@ def get_file(media_id: int):
         raise HTTPException(status_code=404, detail="File missing")
     mime, _ = mimetypes.guess_type(row["path"])
     # FileResponse honors HTTP Range requests, so <video> seeking works.
-    return FileResponse(row["path"], media_type=mime or "application/octet-stream")
+    return FileResponse(
+        row["path"], media_type=mime or "application/octet-stream", headers=_REVALIDATE
+    )
 
 
 @app.get("/api/display/{media_id}")
@@ -169,11 +197,13 @@ def get_display(media_id: int):
     path = Path(row["path"])
     if row["kind"] != "image" or is_web_safe(path):
         mime, _ = mimetypes.guess_type(str(path))
-        return FileResponse(str(path), media_type=mime or "application/octet-stream")
+        return FileResponse(
+            str(path), media_type=mime or "application/octet-stream", headers=_REVALIDATE
+        )
     jpeg = generate_display(path)
     if not jpeg:
         raise HTTPException(status_code=415, detail="Cannot render this image")
-    return FileResponse(jpeg, media_type="image/jpeg")
+    return FileResponse(jpeg, media_type="image/jpeg", headers=_REVALIDATE)
 
 
 # ------------------------------------------------------------- People -------
@@ -255,7 +285,7 @@ def get_person_face(person_id: int):
     )
     if not data:
         raise HTTPException(status_code=404, detail="Crop failed")
-    return Response(content=data, media_type="image/webp")
+    return Response(content=data, media_type="image/webp", headers=_REVALIDATE)
 
 
 # ------------------------------------------------------------- Search -------
@@ -278,16 +308,16 @@ def get_place_media(key: str) -> dict:
 
 
 @app.get("/api/geo/media")
-def get_geo_media() -> dict:
-    return {"items": repository.geotagged_media()}
+def get_geo_media(sort: str = "newest") -> dict:
+    return {"items": repository.geotagged_media(sort=sort)}
 
 
 # --------------------------------------------------------- Map tiles --------
 
-@app.get("/api/tile/{z}/{x}/{y}")
-def get_tile(z: int, x: int, y: int):
-    """Cached OSM tile. 404 when offline and not yet cached (blank tile)."""
-    data = tiles.get_tile(z, x, y)
+@app.get("/api/tile/{style}/{z}/{x}/{y}")
+def get_tile(style: str, z: int, x: int, y: int):
+    """Cached map tile. 404 when offline and not yet cached (blank tile)."""
+    data = tiles.get_tile(style, z, x, y)
     if data is None:
         raise HTTPException(status_code=404, detail="Tile unavailable offline")
     return Response(

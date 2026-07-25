@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import IMAGE_EXTENSIONS, MEDIA_EXTENSIONS
-from .db import get_conn, transaction
+from .db import get_conn, stable_media_id, transaction
 from .media_utils import extract_metadata, generate_thumbnail, generate_video_thumbnail
 
 
@@ -99,11 +99,12 @@ def _index_file(conn, folder_id: int, path: Path) -> bool:
     conn.execute(
         """
         INSERT INTO media (
-            folder_id, path, filename, kind, size_bytes, width, height,
+            id, folder_id, path, filename, kind, size_bytes, width, height,
             taken_at, thumb_path, camera_make, camera_model, gps_lat, gps_lon
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            stable_media_id(str(path)),
             folder_id,
             str(path),
             path.name,

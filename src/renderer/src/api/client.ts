@@ -37,9 +37,10 @@ export function displayUrl(id: number): string {
 export function personFaceUrl(personId: number): string {
   return `${baseUrl}/api/people/${personId}/face`
 }
-/** Leaflet tile template routed through the local caching proxy. */
-export function tileUrlTemplate(): string {
-  return `${baseUrl}/api/tile/{z}/{x}/{y}`
+/** Leaflet tile template routed through the local caching proxy.
+ *  style: 'light' | 'dark' | 'voyager' (CARTO basemaps). */
+export function tileUrlTemplate(style: 'light' | 'dark' | 'voyager'): string {
+  return `${baseUrl}/api/tile/${style}/{z}/{x}/{y}`
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -85,6 +86,13 @@ export const api = {
       body: JSON.stringify({ flag, value })
     }),
   similar: (id: number) => req<{ items: MediaItem[] }>(`/api/media/${id}/similar`),
+  addTag: (id: number, label: string) =>
+    req<{ tag: { id: number; kind: string; label: string; confidence: number } }>(
+      `/api/media/${id}/tags`,
+      { method: 'POST', body: JSON.stringify({ label }) }
+    ),
+  deleteTag: (id: number, tagId: number) =>
+    req<{ ok: boolean }>(`/api/media/${id}/tags/${tagId}`, { method: 'DELETE' }),
 
   // people
   people: (includeHidden = false) =>
@@ -114,7 +122,8 @@ export const api = {
   places: () => req<{ places: Place[] }>('/api/places'),
   placeMedia: (key: string) =>
     req<{ items: MediaItem[] }>(`/api/places/media?key=${encodeURIComponent(key)}`),
-  geoMedia: () => req<{ items: MediaItem[] }>('/api/geo/media'),
+  geoMedia: (sort: 'newest' | 'oldest' = 'newest') =>
+    req<{ items: MediaItem[] }>(`/api/geo/media?sort=${sort}`),
   tileStats: () => req<{ tiles: number; bytes: number }>('/api/tiles/stats'),
   clearTiles: () =>
     req<{ cleared: { tiles: number; bytes: number } }>('/api/tiles/clear', {

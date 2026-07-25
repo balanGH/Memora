@@ -22,7 +22,7 @@ export interface MediaDetail extends MediaItem {
   camera_make: string | null
   camera_model: string | null
   taken_at: string | null
-  tags: { kind: string; label: string; confidence: number }[]
+  tags: { id: number; kind: string; label: string; confidence: number }[]
   people: { id: number; name: string | null }[]
 }
 

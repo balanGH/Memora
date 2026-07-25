@@ -8,8 +8,12 @@ import {
   Typography,
   Divider,
   Chip,
-  Stack
+  Stack,
+  Avatar,
+  TextField
 } from '@mui/material'
+import AddIcon from '@mui/icons-material/Add'
+import { useNavigate } from 'react-router-dom'
 import CloseIcon from '@mui/icons-material/Close'
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft'
 import ChevronRightIcon from '@mui/icons-material/ChevronRight'
@@ -21,7 +25,7 @@ import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
 import ZoomInIcon from '@mui/icons-material/ZoomIn'
 import ZoomOutIcon from '@mui/icons-material/ZoomOut'
 import PlaceIcon from '@mui/icons-material/Place'
-import { api, displayUrl, fileUrl } from '../api/client'
+import { api, displayUrl, fileUrl, personFaceUrl, thumbUrl } from '../api/client'
 import type { MediaItem, MediaDetail } from '../api/types'
 
 interface Props {
@@ -40,8 +44,10 @@ export default function PhotoViewer({
   onMutate
 }: Props): JSX.Element {
   const item = items[index]
+  const navigate = useNavigate()
   const [detail, setDetail] = useState<MediaDetail | null>(null)
   const [showInfo, setShowInfo] = useState(false)
+  const [tagInput, setTagInput] = useState('')
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const dragging = useRef<{ x: number; y: number } | null>(null)
@@ -51,8 +57,42 @@ export default function PhotoViewer({
     setPan({ x: 0, y: 0 })
   }, [])
 
+  // Jump from a face in this photo to that person's full set of photos.
+  const goToPerson = useCallback(
+    (personId: number) => {
+      onClose()
+      navigate(`/people/${personId}`)
+    },
+    [navigate, onClose]
+  )
+
+  // AI tags can be wrong (e.g. a group photo tagged "beach") — let the user
+  // correct them. Updates run against the local detail state so the panel
+  // reflects the change without a reload.
+  const addTag = useCallback(async () => {
+    const label = tagInput.trim()
+    if (!label || !item) return
+    const { tag } = await api.addTag(item.id, label)
+    setTagInput('')
+    setDetail((d) =>
+      d && !d.tags.some((t) => t.id === tag.id)
+        ? { ...d, tags: [...d.tags, tag] }
+        : d
+    )
+  }, [tagInput, item])
+
+  const removeTag = useCallback(
+    async (tagId: number) => {
+      if (!item) return
+      await api.deleteTag(item.id, tagId)
+      setDetail((d) => (d ? { ...d, tags: d.tags.filter((t) => t.id !== tagId) } : d))
+    },
+    [item]
+  )
+
   useEffect(() => {
     reset()
+    setTagInput('')
     if (item) api.mediaDetail(item.id).then(setDetail).catch(() => setDetail(null))
   }, [item?.id, reset])
 
@@ -234,8 +274,14 @@ export default function PhotoViewer({
           )}
         </Box>
 
-        {/* info drawer */}
-        <Drawer anchor="right" open={showInfo} onClose={() => setShowInfo(false)}>
+        {/* info drawer — force above the fullscreen viewer Modal (default
+            Drawer z-index sits below it, which hid the panel entirely). */}
+        <Drawer
+          anchor="right"
+          open={showInfo}
+          onClose={() => setShowInfo(false)}
+          sx={{ zIndex: (t) => t.zIndex.modal + 2 }}
+        >
           <Box sx={{ width: 320, p: 2.5 }}>
             <Typography variant="h6" gutterBottom>
               Info
@@ -289,27 +335,92 @@ export default function PhotoViewer({
                     <Typography variant="caption" color="text.secondary">
                       People
                     </Typography>
-                    <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mt: 0.5 }}>
+                    <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap', mt: 1 }}>
                       {detail.people.map((p) => (
-                        <Chip key={p.id} label={p.name ?? 'Unnamed'} size="small" />
+                        <Box
+                          key={p.id}
+                          onClick={() => goToPerson(p.id)}
+                          role="button"
+                          title={`See all photos of ${p.name ?? 'this person'}`}
+                          sx={{
+                            width: 72,
+                            cursor: 'pointer',
+                            textAlign: 'center',
+                            '&:hover .memora-face': {
+                              boxShadow: (t) => `0 0 0 2px ${t.palette.primary.main}`
+                            }
+                          }}
+                        >
+                          <Avatar
+                            className="memora-face"
+                            src={personFaceUrl(p.id)}
+                            imgProps={{
+                              // Fall back to the full photo's thumbnail if there's
+                              // no cropped face for this person yet.
+                              onError: (e) => {
+                                const img = e.currentTarget
+                                if (!img.dataset.fallback) {
+                                  img.dataset.fallback = '1'
+                                  img.src = thumbUrl(item.id)
+                                }
+                              }
+                            }}
+                            sx={{ width: 56, height: 56, mx: 'auto', mb: 0.5 }}
+                          />
+                          <Typography variant="caption" noWrap sx={{ display: 'block' }}>
+                            {p.name ?? 'Unnamed'}
+                          </Typography>
+                        </Box>
                       ))}
                     </Box>
                   </Box>
                 )}
-                {detail.tags.length > 0 && (
-                  <Box>
-                    <Typography variant="caption" color="text.secondary">
-                      Tags
-                    </Typography>
-                    <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mt: 0.5 }}>
-                      {detail.tags
-                        .filter((t) => t.kind !== 'ocr')
-                        .map((t, i) => (
-                          <Chip key={i} label={t.label} size="small" variant="outlined" />
-                        ))}
-                    </Box>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">
+                    Tags
+                  </Typography>
+                  <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mt: 0.5, mb: 1 }}>
+                    {detail.tags.filter((t) => t.kind !== 'ocr').length === 0 && (
+                      <Typography variant="body2" color="text.secondary">
+                        No tags yet
+                      </Typography>
+                    )}
+                    {detail.tags
+                      .filter((t) => t.kind !== 'ocr')
+                      .map((t) => (
+                        <Chip
+                          key={t.id}
+                          label={t.label}
+                          size="small"
+                          variant="outlined"
+                          onDelete={() => removeTag(t.id)}
+                        />
+                      ))}
                   </Box>
-                )}
+                  <Box sx={{ display: 'flex', gap: 1 }}>
+                    <TextField
+                      size="small"
+                      placeholder="Add a tag"
+                      value={tagInput}
+                      onChange={(e) => setTagInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          addTag()
+                        }
+                      }}
+                      fullWidth
+                    />
+                    <IconButton
+                      onClick={addTag}
+                      disabled={!tagInput.trim()}
+                      size="small"
+                      aria-label="Add tag"
+                    >
+                      <AddIcon />
+                    </IconButton>
+                  </Box>
+                </Box>
               </Stack>
             )}
           </Box>

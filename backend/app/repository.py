@@ -76,7 +76,7 @@ def get_media(media_id: int) -> Optional[dict]:
     d["tags"] = [
         dict(t)
         for t in conn.execute(
-            "SELECT kind, label, confidence FROM tags WHERE media_id = ? AND kind != 'embedding'",
+            "SELECT id, kind, label, confidence FROM tags WHERE media_id = ? AND kind != 'embedding'",
             (media_id,),
         ).fetchall()
     ]
@@ -89,6 +89,40 @@ def get_media(media_id: int) -> Optional[dict]:
         ).fetchall()
     ]
     return d
+
+
+def add_tag(media_id: int, label: str, kind: str = "user") -> Optional[dict]:
+    """Add a manual tag to a photo, ignoring blank or exact-duplicate labels.
+
+    Returns the new tag row, or the existing one if the same label is already
+    present (case-insensitive), so the UI can render it without a reload.
+    """
+    label = label.strip()
+    if not label:
+        raise ValueError("Empty tag")
+    with transaction() as conn:
+        existing = conn.execute(
+            "SELECT id, kind, label, confidence FROM tags "
+            "WHERE media_id = ? AND kind != 'embedding' AND lower(label) = lower(?)",
+            (media_id, label),
+        ).fetchone()
+        if existing:
+            return dict(existing)
+        cur = conn.execute(
+            "INSERT INTO tags (media_id, kind, label, confidence) VALUES (?, ?, ?, ?)",
+            (media_id, kind, label, 1.0),
+        )
+        return {"id": cur.lastrowid, "kind": kind, "label": label, "confidence": 1.0}
+
+
+def delete_tag(media_id: int, tag_id: int) -> bool:
+    """Remove a single tag from a photo. Never touches embedding rows."""
+    with transaction() as conn:
+        cur = conn.execute(
+            "DELETE FROM tags WHERE id = ? AND media_id = ? AND kind != 'embedding'",
+            (tag_id, media_id),
+        )
+    return cur.rowcount > 0
 
 
 def set_flag(media_id: int, flag: str, value: bool) -> bool:
@@ -358,15 +392,20 @@ def list_places() -> list[dict]:
     return sorted(clusters.values(), key=lambda c: c["count"], reverse=True)
 
 
-def geotagged_media(limit: int = 5000) -> list[dict]:
-    """All geotagged photos, oldest first — the timeline that drives the map."""
+def geotagged_media(limit: int = 5000, sort: str = "newest") -> list[dict]:
+    """All geotagged photos — the timeline that drives the map.
+
+    ``sort`` is 'newest' (latest photo leads the filmstrip) or 'oldest'
+    (chronological). Anything else falls back to newest.
+    """
+    order = "ASC, id ASC" if sort == "oldest" else "DESC, id DESC"
     conn = get_conn()
     rows = conn.execute(
-        """SELECT id, filename, kind, width, height, taken_at, thumb_path,
+        f"""SELECT id, filename, kind, width, height, taken_at, thumb_path,
                   is_favorite, gps_lat, gps_lon
            FROM media
            WHERE gps_lat IS NOT NULL AND gps_lon IS NOT NULL AND is_trashed = 0
-           ORDER BY taken_at ASC, id ASC
+           ORDER BY taken_at {order}
            LIMIT ?""",
         (limit,),
     ).fetchall()

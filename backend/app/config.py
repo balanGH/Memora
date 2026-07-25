@@ -25,7 +25,7 @@ PORT = int(os.environ.get("MEMORA_PORT", "8756"))
 
 # Media handling
 IMAGE_EXTENSIONS = {
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+    ".jpg", ".JPG", "jpeg", ".png", ".gif", ".bmp", ".webp",
     ".tif", ".tiff", ".heic", ".heif",
 }
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}

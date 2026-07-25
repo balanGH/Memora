@@ -3,6 +3,7 @@ import { Box, ToggleButton, ToggleButtonGroup, MenuItem, TextField } from '@mui/
 import PhotoGrid from '../components/PhotoGrid'
 import PhotoViewer from '../components/PhotoViewer'
 import { api } from '../api/client'
+import { useScanStatus } from '../hooks/useScanStatus'
 import type { LibraryView, MediaItem, SortKey } from '../api/types'
 import type { Grouping } from '../components/dateGroups'
 
@@ -24,6 +25,8 @@ export default function LibraryPage({ view }: { view: LibraryView }): JSX.Elemen
   const offset = useRef(0)
   const total = useRef(0)
   const loading = useRef(false)
+  const scan = useScanStatus()
+  const wasBusy = useRef(false)
 
   const load = useCallback(
     async (reset: boolean) => {
@@ -47,6 +50,17 @@ export default function LibraryPage({ view }: { view: LibraryView }): JSX.Elemen
     setItems([])
     load(true)
   }, [view, sort, load])
+
+  // Auto-refresh when a scan or AI pass finishes, so newly indexed photos
+  // appear without needing to switch tabs and back.
+  useEffect(() => {
+    const busy = !!(scan?.scan.running || scan?.ai.running)
+    if (wasBusy.current && !busy) {
+      offset.current = 0
+      load(true)
+    }
+    wasBusy.current = busy
+  }, [scan, load])
 
   const onEndReached = useCallback(() => {
     if (offset.current < total.current) load(false)

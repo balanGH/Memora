@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Box, Typography, Chip, Stack } from '@mui/material'
+import { Box, Typography, Chip, Stack, ToggleButton, ToggleButtonGroup } from '@mui/material'
 import PublicIcon from '@mui/icons-material/Public'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import PhotoViewer from '../components/PhotoViewer'
 import { api, thumbUrl, tileUrlTemplate } from '../api/client'
 import type { MediaItem } from '../api/types'
+import { useColorMode } from '../context/ColorModeContext'
 
 const BASE_STYLE: L.CircleMarkerOptions = {
   radius: 6,
@@ -31,8 +32,10 @@ function dateLabel(taken: string | null): string {
 }
 
 export default function PlacesPage(): JSX.Element {
+  const { mode } = useColorMode()
   const mapElRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<L.Map | null>(null)
+  const tileLayerRef = useRef<L.TileLayer | null>(null)
   const markersRef = useRef<L.CircleMarker[]>([])
   const stripRef = useRef<HTMLDivElement>(null)
   const scrollRaf = useRef<number | null>(null)
@@ -42,6 +45,7 @@ export default function PlacesPage(): JSX.Element {
   const [active, setActive] = useState(-1)
   const [viewerIndex, setViewerIndex] = useState<number | null>(null)
   const [loaded, setLoaded] = useState(false)
+  const [sort, setSort] = useState<'newest' | 'oldest'>('newest')
 
   // --- init map once -------------------------------------------------------
   useEffect(() => {
@@ -53,12 +57,15 @@ export default function PlacesPage(): JSX.Element {
     // Tiles come from the local caching proxy — downloaded once, then served
     // from disk (works offline on revisit). Blank tile shown when uncached +
     // offline, instead of a broken image.
-    L.tileLayer(tileUrlTemplate(), {
-      maxZoom: 19,
-      attribution: '© OpenStreetMap contributors',
-      errorTileUrl:
-        'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="%23e8eaed"/></svg>'
-    }).addTo(map)
+    tileLayerRef.current = L.tileLayer(
+      tileUrlTemplate(mode === 'dark' ? 'dark' : 'light'),
+      {
+        maxZoom: 20,
+        attribution: '© OpenStreetMap contributors © CARTO',
+        errorTileUrl:
+          'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="%23e8eaed"/></svg>'
+      }
+    ).addTo(map)
     mapRef.current = map
     // container starts at final size, but invalidate once to be safe
     setTimeout(() => map.invalidateSize(), 100)
@@ -68,13 +75,19 @@ export default function PlacesPage(): JSX.Element {
     }
   }, [])
 
+  // Swap the basemap style to match the app theme (no map rebuild).
+  useEffect(() => {
+    tileLayerRef.current?.setUrl(tileUrlTemplate(mode === 'dark' ? 'dark' : 'light'))
+  }, [mode])
+
   // --- load geotagged photos + build markers -------------------------------
   useEffect(() => {
+    setActive(-1)
     api
-      .geoMedia()
+      .geoMedia(sort)
       .then((r) => setItems(r.items))
       .finally(() => setLoaded(true))
-  }, [])
+  }, [sort])
 
   useEffect(() => {
     const map = mapRef.current
@@ -155,6 +168,16 @@ export default function PlacesPage(): JSX.Element {
             Places
           </Typography>
           {loaded && <Chip size="small" label={`${items.length} geotagged`} />}
+          <Box sx={{ flex: 1 }} />
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            value={sort}
+            onChange={(_, v) => v && setSort(v)}
+          >
+            <ToggleButton value="newest">Newest first</ToggleButton>
+            <ToggleButton value="oldest">Oldest first</ToggleButton>
+          </ToggleButtonGroup>
         </Stack>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
           Scroll the timeline to fly the map to where each photo was taken. Click a map pin

@@ -6,6 +6,7 @@ helper; SQLite handles concurrency with WAL mode.
 """
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -14,6 +15,21 @@ from typing import Iterator
 from .config import DB_PATH, ensure_dirs
 
 _local = threading.local()
+
+
+def stable_media_id(path: str) -> int:
+    """Deterministic media id derived from the file path.
+
+    Using a hash of the path (instead of an auto-incrementing counter) means the
+    same photo always gets the same id — even after the DB is wiped and rebuilt.
+    Media bytes are served by id (/api/thumb/{id}), so a stable id prevents a
+    rebuilt library from mapping an id to a different file and showing a stale,
+    browser-cached thumbnail. 52 bits (13 hex chars) stays within JavaScript's
+    safe-integer range (2**53); larger ids would be rounded when the frontend
+    parses the JSON, breaking every media URL. Collision chance is negligible
+    for a personal library.
+    """
+    return int(hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:13], 16)
 
 
 SCHEMA = """
@@ -135,8 +151,46 @@ def transaction() -> Iterator[sqlite3.Connection]:
         raise
 
 
+def _migrate_stable_ids(conn: sqlite3.Connection) -> None:
+    """Remap any media rows whose id doesn't match their path-derived id.
+
+    One-time upgrade for libraries created before ids were path-stable. Updates
+    the media PK and every table that references it. New ids are ~60-bit values,
+    so they never collide with the small legacy ids being replaced.
+    """
+    rows = conn.execute("SELECT id, path FROM media").fetchall()
+    remap = [
+        (r["id"], stable_media_id(r["path"]))
+        for r in rows
+        if r["id"] != stable_media_id(r["path"])
+    ]
+    if not remap:
+        return
+
+    conn.commit()  # PRAGMA foreign_keys is a no-op inside a transaction
+    conn.execute("PRAGMA foreign_keys=OFF;")
+    try:
+        for old, new in remap:
+            conn.execute("UPDATE media SET id=? WHERE id=?", (new, old))
+            conn.execute("UPDATE faces SET media_id=? WHERE media_id=?", (new, old))
+            conn.execute("UPDATE tags SET media_id=? WHERE media_id=?", (new, old))
+            conn.execute(
+                "UPDATE album_media SET media_id=? WHERE media_id=?", (new, old)
+            )
+            conn.execute(
+                "UPDATE people SET cover_media_id=? WHERE cover_media_id=?", (new, old)
+            )
+            conn.execute(
+                "UPDATE albums SET cover_media_id=? WHERE cover_media_id=?", (new, old)
+            )
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON;")
+
+
 def init_db() -> None:
     """Create tables if they don't exist."""
     conn = get_conn()
     conn.executescript(SCHEMA)
     conn.commit()
+    _migrate_stable_ids(conn)
