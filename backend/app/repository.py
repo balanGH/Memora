@@ -591,6 +591,97 @@ def auto_connect(min_shared: int = 2, label: str = "appears with") -> int:
     return created
 
 
+def family_suggestions(min_gap: float = 15.0, min_shared: int = 1, limit: int = 12) -> list[dict]:
+    """Heuristic parent->child suggestions from estimated ages.
+
+    Requires the real (InsightFace) backend, which fills faces.age. For each pair
+    that appears together, if their median ages differ by at least ``min_gap``
+    years we suggest the older as parent of the younger. It's a hint to confirm,
+    never a certainty — returns [] when there's no age data (stub backend).
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT person_id, age, gender FROM faces "
+        "WHERE person_id IS NOT NULL AND age IS NOT NULL"
+    ).fetchall()
+    if not rows:
+        return []
+
+    ages: dict[int, list[float]] = {}
+    genders: dict[int, list[str]] = {}
+    for r in rows:
+        ages.setdefault(r["person_id"], []).append(r["age"])
+        if r["gender"]:
+            genders.setdefault(r["person_id"], []).append(r["gender"])
+
+    def median(xs: list[float]) -> float:
+        xs = sorted(xs)
+        n = len(xs)
+        return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+    med_age = {pid: median(v) for pid, v in ages.items()}
+    dom_gender = {
+        pid: max(set(g), key=g.count) for pid, g in genders.items() if g
+    }
+
+    existing: set[tuple[int, int]] = set()
+    for r in conn.execute("SELECT person_a, person_b FROM relationships").fetchall():
+        existing.add((r["person_a"], r["person_b"]))
+        existing.add((r["person_b"], r["person_a"]))
+
+    pairs = conn.execute(
+        """SELECT f1.person_id AS a, f2.person_id AS b,
+                  COUNT(DISTINCT f1.media_id) AS shared
+           FROM faces f1
+           JOIN faces f2
+             ON f1.media_id = f2.media_id AND f1.person_id < f2.person_id
+           WHERE f1.person_id IS NOT NULL AND f2.person_id IS NOT NULL
+           GROUP BY f1.person_id, f2.person_id
+           HAVING shared >= ?""",
+        (max(1, min_shared),),
+    ).fetchall()
+
+    out: list[dict] = []
+    for r in pairs:
+        a, b = r["a"], r["b"]
+        if (a, b) in existing or a not in med_age or b not in med_age:
+            continue
+        gap = abs(med_age[a] - med_age[b])
+        if gap < min_gap:
+            continue
+        parent, child = (a, b) if med_age[a] > med_age[b] else (b, a)
+        out.append(
+            {
+                "parent": parent,
+                "child": child,
+                "parent_age": round(med_age[parent]),
+                "child_age": round(med_age[child]),
+                "gap": round(gap),
+                "shared": r["shared"],
+                "parent_gender": dom_gender.get(parent),
+            }
+        )
+
+    out.sort(key=lambda s: (s["shared"], s["gap"]), reverse=True)
+    out = out[:limit]
+
+    ids: set[int] = set()
+    for s in out:
+        ids.add(s["parent"])
+        ids.add(s["child"])
+    names: dict[int, Optional[str]] = {}
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        for r in conn.execute(
+            f"SELECT id, name FROM people WHERE id IN ({placeholders})", tuple(ids)
+        ).fetchall():
+            names[r["id"]] = r["name"]
+    for s in out:
+        s["parent_name"] = names.get(s["parent"])
+        s["child_name"] = names.get(s["child"])
+    return out
+
+
 def relation_suggestions(limit: int = 8) -> list[dict]:
     """Suggest links from face co-occurrence: people photographed together most,
     excluding pairs that already have a relationship."""

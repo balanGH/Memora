@@ -68,10 +68,11 @@ def _persist_face(conn, media_id: int, face, threshold: float) -> None:
     person_id = _assign_person(conn, face.embedding, threshold)
     conn.execute(
         """INSERT INTO faces(media_id, person_id, bbox_x, bbox_y, bbox_w,
-                             bbox_h, embedding)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                             bbox_h, embedding, age, gender)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (media_id, person_id, face.bbox.x, face.bbox.y, face.bbox.w,
-         face.bbox.h, _pack(face.embedding)),
+         face.bbox.h, _pack(face.embedding),
+         getattr(face, "age", None), getattr(face, "gender", None)),
     )
     conn.execute(
         "UPDATE people SET cover_media_id = ? WHERE id = ? AND cover_media_id IS NULL",

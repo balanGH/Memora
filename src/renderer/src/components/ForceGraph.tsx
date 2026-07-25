@@ -21,6 +21,79 @@ interface Props {
   edgeColor: (label: string) => string
   /** Bump this to recenter the view (reset pan/zoom) and re-settle the layout. */
   resetSignal?: number
+  /** 'force' = physics graph; 'tree' = layered generations (parent above child). */
+  layout?: 'force' | 'tree'
+}
+
+/** Layered tree layout: directed (parent->child) edges set generations; nodes
+ *  joined only by undirected links (spouse/sibling/friend) share a level. */
+function treeLayout(nodes: GNode[], edges: GEdge[]): Map<number, { x: number; y: number }> {
+  const ids = nodes.map((n) => n.id)
+  const level = new Map<number, number>(ids.map((id) => [id, 0]))
+
+  // Longest-path levelling along parent->child edges.
+  for (let iter = 0; iter < ids.length + 1; iter++) {
+    let changed = false
+    for (const e of edges) {
+      if (!e.directed) continue
+      const nl = (level.get(e.a) ?? 0) + 1
+      if (nl > (level.get(e.b) ?? 0)) {
+        level.set(e.b, nl)
+        changed = true
+      }
+    }
+    if (!changed) break
+  }
+  // Pull same-level relations (friend/sibling/spouse) onto one row.
+  for (let iter = 0; iter < ids.length + 1; iter++) {
+    let changed = false
+    for (const e of edges) {
+      if (e.directed) continue
+      const m = Math.max(level.get(e.a) ?? 0, level.get(e.b) ?? 0)
+      if ((level.get(e.a) ?? 0) !== m) {
+        level.set(e.a, m)
+        changed = true
+      }
+      if ((level.get(e.b) ?? 0) !== m) {
+        level.set(e.b, m)
+        changed = true
+      }
+    }
+    if (!changed) break
+  }
+
+  const byLevel = new Map<number, number[]>()
+  ids.forEach((id) => {
+    const l = level.get(id) ?? 0
+    if (!byLevel.has(l)) byLevel.set(l, [])
+    byLevel.get(l)!.push(id)
+  })
+
+  const ROW_H = 150
+  const COL_W = 130
+  const levels = [...byLevel.keys()].sort((a, b) => a - b)
+  const maxL = levels.length ? levels[levels.length - 1] : 0
+  const out = new Map<number, { x: number; y: number }>()
+  // Order each row near parents' x to reduce edge crossings.
+  for (const l of levels) {
+    const row = byLevel.get(l)!
+    row.sort((n1, n2) => {
+      const px = (id: number): number => {
+        const parents = edges
+          .filter((e) => e.directed && e.b === id && out.has(e.a))
+          .map((e) => out.get(e.a)!.x)
+        return parents.length ? parents.reduce((s, x) => s + x, 0) / parents.length : 0
+      }
+      return px(n1) - px(n2)
+    })
+    row.forEach((id, i) => {
+      out.set(id, {
+        x: (i - (row.length - 1) / 2) * COL_W,
+        y: (l - maxL / 2) * ROW_H
+      })
+    })
+  }
+  return out
 }
 
 interface P {
@@ -38,6 +111,10 @@ const SPRING = 0.015
 const REST = 130
 const CENTER = 0.006
 const DAMP = 0.82
+// Directed (parent->child) edges get a vertical bias so generations stack
+// top-to-bottom, giving family chains a tree-like hierarchy.
+const HIER_GAP = 100
+const HIER_K = 0.07
 
 function radiusOf(n: GNode): number {
   return 16 + Math.min(n.photo_count ?? 0, 12) * 1.4
@@ -48,12 +125,27 @@ export default function ForceGraph({
   edges,
   onOpen,
   edgeColor,
-  resetSignal = 0
+  resetSignal = 0,
+  layout = 'force'
 }: Props): JSX.Element {
   const svgRef = useRef<SVGSVGElement>(null)
   const pos = useRef<Map<number, P>>(new Map())
   const raf = useRef<number | null>(null)
   const alphaRef = useRef(1)
+  const layoutRef = useRef(layout)
+  layoutRef.current = layout
+
+  // Apply the static tree layout into the position map.
+  const applyTree = useCallback(() => {
+    if (raf.current !== null) {
+      cancelAnimationFrame(raf.current)
+      raf.current = null
+    }
+    const tl = treeLayout(nodes, edges)
+    const map = pos.current
+    tl.forEach((p, id) => map.set(id, { x: p.x, y: p.y, vx: 0, vy: 0 }))
+    setFrame((f) => f + 1)
+  }, [nodes, edges])
 
   const dragId = useRef<number | null>(null)
   const dragged = useRef(false)
@@ -74,10 +166,14 @@ export default function ForceGraph({
         map.set(n.id, { x: Math.cos(ang) * 160, y: Math.sin(ang) * 160, vx: 0, vy: 0 })
       }
     })
-    alphaRef.current = 1
-    start()
+    if (layout === 'tree') {
+      applyTree()
+    } else {
+      alphaRef.current = 1
+      start()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges])
+  }, [nodes, edges, layout])
 
   const tick = useCallback(() => {
     const map = pos.current
@@ -122,6 +218,12 @@ export default function ForceGraph({
       fy.set(e.a, fy.get(e.a)! + dy)
       fx.set(e.b, fx.get(e.b)! - dx)
       fy.set(e.b, fy.get(e.b)! - dy)
+      // hierarchy: keep the child (e.b) about HIER_GAP below the parent (e.a)
+      if (e.directed) {
+        const err = b.y - a.y - HIER_GAP
+        fy.set(e.a, fy.get(e.a)! + err * HIER_K)
+        fy.set(e.b, fy.get(e.b)! - err * HIER_K)
+      }
     }
 
     let maxV = 0
@@ -148,6 +250,7 @@ export default function ForceGraph({
   }, [nodes, edges])
 
   const start = useCallback(() => {
+    if (layoutRef.current === 'tree') return // tree layout is static
     if (raf.current === null) raf.current = requestAnimationFrame(tick)
   }, [tick])
 
@@ -162,6 +265,10 @@ export default function ForceGraph({
     if (resetSignal === 0) return
     setPan({ x: 0, y: 0 })
     setZoom(1)
+    if (layout === 'tree') {
+      applyTree()
+      return
+    }
     const map = pos.current
     nodes.forEach((n, i) => {
       const p = map.get(n.id)
@@ -303,6 +410,7 @@ export default function ForceGraph({
                   fontSize={11}
                   fontWeight={600}
                   fill={col}
+                  style={{ pointerEvents: 'none' }}
                 >
                   {e.label}
                 </text>

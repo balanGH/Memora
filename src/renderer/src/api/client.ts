@@ -8,6 +8,7 @@ import type {
   MediaPage,
   Person,
   Place,
+  FamilySuggestion,
   RelationEdge,
   RelationGraph,
   RelationSuggestion,
@@ -155,6 +156,8 @@ export const api = {
   relations: () => req<RelationGraph>('/api/relations'),
   relationSuggestions: () =>
     req<{ suggestions: RelationSuggestion[] }>('/api/relations/suggestions'),
+  familySuggestions: () =>
+    req<{ suggestions: FamilySuggestion[] }>('/api/relations/family-suggestions'),
   autoConnectRelations: (minShared: number) =>
     req<{ created: number }>('/api/relations/auto', {
       method: 'POST',

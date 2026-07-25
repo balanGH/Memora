@@ -19,17 +19,25 @@ import {
   Tooltip,
   Avatar,
   Snackbar,
-  Alert
+  Alert,
+  Checkbox
 } from '@mui/material'
 import HubIcon from '@mui/icons-material/Hub'
 import AddIcon from '@mui/icons-material/Add'
 import DeleteIcon from '@mui/icons-material/Delete'
+import EditIcon from '@mui/icons-material/Edit'
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome'
 import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh'
 import CenterFocusStrongIcon from '@mui/icons-material/CenterFocusStrong'
 import ForceGraph from '../components/ForceGraph'
+import FamilyRestroomIcon from '@mui/icons-material/FamilyRestroom'
 import { api, personFaceUrl } from '../api/client'
-import type { Person, RelationGraph, RelationSuggestion } from '../api/types'
+import type {
+  FamilySuggestion,
+  Person,
+  RelationGraph,
+  RelationSuggestion
+} from '../api/types'
 
 // Preset relationship types → label, direction, and edge color.
 interface Preset {
@@ -75,6 +83,7 @@ export default function RelationsPage(): JSX.Element {
   const [graph, setGraph] = useState<RelationGraph>({ nodes: [], edges: [] })
   const [people, setPeople] = useState<Person[]>([])
   const [suggestions, setSuggestions] = useState<RelationSuggestion[]>([])
+  const [family, setFamily] = useState<FamilySuggestion[]>([])
   const [loaded, setLoaded] = useState(false)
 
   const [dialog, setDialog] = useState(false)
@@ -84,7 +93,10 @@ export default function RelationsPage(): JSX.Element {
   const [custom, setCustom] = useState('')
   const [customDirected, setCustomDirected] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [editingId, setEditingId] = useState<number | null>(null)
   const [resetSignal, setResetSignal] = useState(0)
+  const [graphMode, setGraphMode] = useState<'force' | 'tree'>('force')
+  const [selEdges, setSelEdges] = useState<Set<number>>(new Set())
   const [autoOpen, setAutoOpen] = useState(false)
   const [minShared, setMinShared] = useState('2')
   const [autoBusy, setAutoBusy] = useState(false)
@@ -93,14 +105,21 @@ export default function RelationsPage(): JSX.Element {
   const load = useCallback(() => {
     api.relations().then(setGraph)
     api.relationSuggestions().then((r) => setSuggestions(r.suggestions))
+    api.familySuggestions().then((r) => setFamily(r.suggestions))
   }, [])
   useEffect(() => {
     Promise.all([
       api.relations().then(setGraph),
       api.relationSuggestions().then((r) => setSuggestions(r.suggestions)),
+      api.familySuggestions().then((r) => setFamily(r.suggestions)),
       api.people(true).then((r) => setPeople(r.people))
     ]).finally(() => setLoaded(true))
   }, [])
+
+  const acceptParent = async (parent: number, child: number): Promise<void> => {
+    await api.addRelation(parent, child, 'parent', true)
+    load()
+  }
 
   const nameOf = useCallback(
     (id: number): string => {
@@ -111,11 +130,32 @@ export default function RelationsPage(): JSX.Element {
   )
 
   const openDialog = (a = '', b = ''): void => {
+    setEditingId(null)
     setAId(a)
     setBId(b)
     setPreset('friend')
     setCustom('')
     setCustomDirected(false)
+    setDialog(true)
+  }
+
+  const openEdit = (edge: RelationGraph['edges'][number]): void => {
+    const lbl = (edge.label || '').toLowerCase()
+    const match = PRESETS.find(
+      (p) => p.key !== 'custom' && p.label === lbl && p.directed === !!edge.directed
+    )
+    setEditingId(edge.id)
+    setAId(String(edge.person_a))
+    setBId(String(edge.person_b))
+    if (match) {
+      setPreset(match.key)
+      setCustom('')
+      setCustomDirected(false)
+    } else {
+      setPreset('custom')
+      setCustom(edge.label)
+      setCustomDirected(!!edge.directed)
+    }
     setDialog(true)
   }
 
@@ -128,8 +168,12 @@ export default function RelationsPage(): JSX.Element {
     const directed = p.key === 'custom' ? customDirected : p.directed
     setSaving(true)
     try {
+      // When editing, remove the original first so changing the people pair
+      // doesn't leave a stale relation behind.
+      if (editingId !== null) await api.deleteRelation(editingId)
       await api.addRelation(a, b, label, directed)
       setDialog(false)
+      setEditingId(null)
       load()
     } finally {
       setSaving(false)
@@ -138,8 +182,41 @@ export default function RelationsPage(): JSX.Element {
 
   const removeRelation = async (id: number): Promise<void> => {
     await api.deleteRelation(id)
+    setSelEdges((prev) => {
+      const n = new Set(prev)
+      n.delete(id)
+      return n
+    })
     load()
   }
+
+  const toggleEdgeSel = (id: number): void => {
+    setSelEdges((prev) => {
+      const n = new Set(prev)
+      n.has(id) ? n.delete(id) : n.add(id)
+      return n
+    })
+  }
+  const allSelected = graph.edges.length > 0 && selEdges.size === graph.edges.length
+  const toggleSelectAll = (): void => {
+    setSelEdges(allSelected ? new Set() : new Set(graph.edges.map((e) => e.id)))
+  }
+
+  const deleteSelected = async (): Promise<void> => {
+    if (selEdges.size === 0) return
+    await Promise.all([...selEdges].map((id) => api.deleteRelation(id)))
+    setSelEdges(new Set())
+    load()
+  }
+
+  const clearAll = async (): Promise<void> => {
+    if (graph.edges.length === 0) return
+    if (!window.confirm(`Delete all ${graph.edges.length} relationships?`)) return
+    await Promise.all(graph.edges.map((e) => api.deleteRelation(e.id)))
+    setSelEdges(new Set())
+    load()
+  }
+
 
   const runAutoConnect = async (): Promise<void> => {
     setAutoBusy(true)
@@ -156,6 +233,51 @@ export default function RelationsPage(): JSX.Element {
       setAutoBusy(false)
     }
   }
+
+  // Grid of selectable people (avatar + name) used in the add/edit dialog.
+  const renderPeopleGrid = (
+    value: string,
+    onChange: (v: string) => void,
+    exclude?: string
+  ): JSX.Element => (
+    <Box
+      sx={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fill, minmax(88px, 1fr))',
+        gap: 1,
+        mt: 0.5,
+        maxHeight: 200,
+        overflow: 'auto',
+        p: 0.5
+      }}
+    >
+      {people
+        .filter((p) => String(p.id) !== exclude)
+        .map((p) => {
+          const on = value === String(p.id)
+          return (
+            <Box
+              key={p.id}
+              onClick={() => onChange(String(p.id))}
+              sx={{
+                cursor: 'pointer',
+                textAlign: 'center',
+                p: 0.75,
+                borderRadius: 2,
+                border: (t) =>
+                  on ? `2px solid ${t.palette.primary.main}` : `1px solid ${t.palette.divider}`,
+                bgcolor: (t) => (on ? t.palette.action.selected : 'transparent')
+              }}
+            >
+              <Avatar src={personFaceUrl(p.id)} sx={{ width: 44, height: 44, mx: 'auto', mb: 0.5 }} />
+              <Typography variant="caption" noWrap sx={{ display: 'block' }}>
+                {p.name ?? `Unnamed #${p.id}`}
+              </Typography>
+            </Box>
+          )
+        })}
+    </Box>
+  )
 
   const gnodes = graph.nodes.map((n) => ({
     id: n.id,
@@ -199,9 +321,37 @@ export default function RelationsPage(): JSX.Element {
         </Button>
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-        Drag faces to rearrange · scroll to zoom · drag the background to pan · hover to
-        focus · click a face to open that person.
+        Graph or Tree view · drag faces · scroll to zoom · hover to focus · click a face to
+        open that person. Edit or delete relationships in the list below.
       </Typography>
+
+      {/* Family (parent/child) suggestions from estimated ages */}
+      {family.length > 0 && (
+        <Box sx={{ mb: 2 }}>
+          <Stack direction="row" alignItems="center" spacing={0.5} sx={{ mb: 0.5 }}>
+            <FamilyRestroomIcon fontSize="small" color="primary" />
+            <Typography variant="subtitle2">Possible parent → child (by age)</Typography>
+          </Stack>
+          <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
+            {family.map((f) => (
+              <Chip
+                key={`${f.parent}-${f.child}`}
+                onClick={() => acceptParent(f.parent, f.child)}
+                avatar={<Avatar src={personFaceUrl(f.parent)} />}
+                label={`${f.parent_name ?? 'Unnamed'} (${f.parent_age}) → ${
+                  f.child_name ?? 'Unnamed'
+                } (${f.child_age})`}
+                variant="outlined"
+                color="primary"
+                icon={<AddIcon />}
+              />
+            ))}
+          </Stack>
+          <Typography variant="caption" color="text.secondary">
+            Guessed from face age estimates — confirm before trusting. Click to add.
+          </Typography>
+        </Box>
+      )}
 
       {/* Suggestions */}
       {suggestions.length > 0 && (
@@ -260,7 +410,25 @@ export default function RelationsPage(): JSX.Element {
               onOpen={(id) => navigate(`/people/${id}`)}
               edgeColor={edgeColor}
               resetSignal={resetSignal}
+              layout={graphMode}
             />
+            {/* Layout toggle */}
+            <ToggleButtonGroup
+              size="small"
+              exclusive
+              value={graphMode}
+              onChange={(_, v) => v && setGraphMode(v)}
+              sx={{
+                position: 'absolute',
+                top: 10,
+                left: 10,
+                bgcolor: 'background.paper',
+                boxShadow: 3
+              }}
+            >
+              <ToggleButton value="force">Graph</ToggleButton>
+              <ToggleButton value="tree">Tree</ToggleButton>
+            </ToggleButtonGroup>
             {/* Recenter — always visible; brings faces back if you pan/zoom away */}
             <Tooltip title="Recenter graph">
               <IconButton
@@ -305,13 +473,53 @@ export default function RelationsPage(): JSX.Element {
             </Box>
           </Box>
 
-          {/* Edit list */}
-          <Typography variant="subtitle2" sx={{ mt: 3, mb: 1 }}>
-            Relationships
-          </Typography>
-          <Stack spacing={1} divider={<Divider flexItem />}>
+          {/* Edit list with selectable / bulk deletion */}
+          <Stack direction="row" alignItems="center" spacing={1} sx={{ mt: 3, mb: 1 }}>
+            <Typography variant="subtitle2" sx={{ flex: 1 }}>
+              Relationships ({graph.edges.length})
+            </Typography>
+            <Button
+              size="small"
+              color="error"
+              startIcon={<DeleteIcon />}
+              disabled={selEdges.size === 0}
+              onClick={deleteSelected}
+            >
+              Delete selected ({selEdges.size})
+            </Button>
+            <Button size="small" color="error" variant="outlined" onClick={clearAll}>
+              Clear all
+            </Button>
+          </Stack>
+          <Stack direction="row" alignItems="center" spacing={1} sx={{ pl: 0.5 }}>
+            <Checkbox
+              size="small"
+              checked={allSelected}
+              indeterminate={selEdges.size > 0 && !allSelected}
+              onChange={toggleSelectAll}
+            />
+            <Typography variant="caption" color="text.secondary">
+              Select all
+            </Typography>
+          </Stack>
+          <Stack divider={<Divider flexItem />}>
             {graph.edges.map((e) => (
-              <Stack key={e.id} direction="row" alignItems="center" spacing={1}>
+              <Stack
+                key={e.id}
+                direction="row"
+                alignItems="center"
+                spacing={1}
+                sx={{
+                  py: 0.5,
+                  bgcolor: (t) =>
+                    selEdges.has(e.id) ? t.palette.action.selected : 'transparent'
+                }}
+              >
+                <Checkbox
+                  size="small"
+                  checked={selEdges.has(e.id)}
+                  onChange={() => toggleEdgeSel(e.id)}
+                />
                 <Typography sx={{ fontWeight: 500 }}>{nameOf(e.person_a)}</Typography>
                 <Chip
                   size="small"
@@ -320,56 +528,75 @@ export default function RelationsPage(): JSX.Element {
                 />
                 <Typography sx={{ fontWeight: 500 }}>{nameOf(e.person_b)}</Typography>
                 <Box sx={{ flex: 1 }} />
-                <IconButton size="small" onClick={() => removeRelation(e.id)}>
-                  <DeleteIcon fontSize="small" />
-                </IconButton>
+                <Tooltip title="Edit this relation">
+                  <IconButton size="small" onClick={() => openEdit(e)}>
+                    <EditIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+                <Tooltip title="Delete this relation">
+                  <IconButton size="small" onClick={() => removeRelation(e.id)}>
+                    <DeleteIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
               </Stack>
             ))}
           </Stack>
         </>
       )}
 
-      {/* Add-relation dialog */}
-      <Dialog open={dialog} onClose={() => setDialog(false)} maxWidth="xs" fullWidth>
-        <DialogTitle>Add relation</DialogTitle>
+      {/* Add / edit relation dialog */}
+      <Dialog open={dialog} onClose={() => setDialog(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>{editingId !== null ? 'Edit relation' : 'Add relation'}</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <TextField
-              select
-              label="Person"
-              value={aId}
-              onChange={(e) => setAId(e.target.value)}
-              fullWidth
-            >
-              {people.map((p) => (
-                <MenuItem key={p.id} value={String(p.id)}>
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <Avatar src={personFaceUrl(p.id)} sx={{ width: 26, height: 26 }} />
-                    <span>
-                      {p.name ?? `Unnamed #${p.id}`} ({p.photo_count})
-                    </span>
-                  </Stack>
-                </MenuItem>
-              ))}
-            </TextField>
+            <Box>
+              <Typography variant="caption" color="text.secondary">
+                Person
+              </Typography>
+              {renderPeopleGrid(aId, setAId)}
+            </Box>
 
             <Box>
               <Typography variant="caption" color="text.secondary">
                 Relationship
               </Typography>
-              <ToggleButtonGroup
-                size="small"
-                exclusive
-                value={preset}
-                onChange={(_, v) => v && setPreset(v)}
-                sx={{ flexWrap: 'wrap', mt: 0.5 }}
+              <Box
+                sx={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(3, 1fr)',
+                  gap: 1,
+                  mt: 0.5
+                }}
               >
-                {PRESETS.map((p) => (
-                  <ToggleButton key={p.key} value={p.key}>
-                    {p.title}
-                  </ToggleButton>
-                ))}
-              </ToggleButtonGroup>
+                {PRESETS.map((p) => {
+                  const on = preset === p.key
+                  return (
+                    <Button
+                      key={p.key}
+                      onClick={() => setPreset(p.key)}
+                      variant={on ? 'contained' : 'outlined'}
+                      size="small"
+                      startIcon={
+                        <Box
+                          sx={{
+                            width: 10,
+                            height: 10,
+                            borderRadius: '50%',
+                            bgcolor: p.color
+                          }}
+                        />
+                      }
+                      sx={{
+                        justifyContent: 'flex-start',
+                        textTransform: 'none',
+                        ...(on && { bgcolor: p.color, color: '#111', '&:hover': { bgcolor: p.color } })
+                      }}
+                    >
+                      {p.title}
+                    </Button>
+                  )
+                })}
+              </Box>
             </Box>
 
             {preset === 'custom' && (
@@ -394,28 +621,14 @@ export default function RelationsPage(): JSX.Element {
               </Stack>
             )}
 
-            <TextField
-              select
-              label={
-                PRESETS.find((p) => p.key === preset)?.directed ? 'Related to (target)' : 'Related to'
-              }
-              value={bId}
-              onChange={(e) => setBId(e.target.value)}
-              fullWidth
-            >
-              {people
-                .filter((p) => String(p.id) !== aId)
-                .map((p) => (
-                  <MenuItem key={p.id} value={String(p.id)}>
-                    <Stack direction="row" spacing={1} alignItems="center">
-                      <Avatar src={personFaceUrl(p.id)} sx={{ width: 26, height: 26 }} />
-                      <span>
-                        {p.name ?? `Unnamed #${p.id}`} ({p.photo_count})
-                      </span>
-                    </Stack>
-                  </MenuItem>
-                ))}
-            </TextField>
+            <Box>
+              <Typography variant="caption" color="text.secondary">
+                {PRESETS.find((p) => p.key === preset)?.directed
+                  ? 'Related to (target)'
+                  : 'Related to'}
+              </Typography>
+              {renderPeopleGrid(bId, setBId, aId)}
+            </Box>
           </Stack>
         </DialogContent>
         <DialogActions>
@@ -427,7 +640,7 @@ export default function RelationsPage(): JSX.Element {
             onClick={addRelation}
             disabled={!aId || !bId || aId === bId || saving}
           >
-            {saving ? 'Adding…' : 'Add'}
+            {saving ? 'Saving…' : editingId !== null ? 'Save' : 'Add'}
           </Button>
         </DialogActions>
       </Dialog>

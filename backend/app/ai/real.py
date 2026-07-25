@@ -66,6 +66,16 @@ class RealFaceService:
             x1, y1, x2, y2 = [float(v) for v in f.bbox]
             bw = max(0.0, x2 - x1)
             bh = max(0.0, y2 - y1)
+            # buffalo_l's genderage model fills these; guard in case it's absent.
+            age = getattr(f, "age", None)
+            gender = None
+            sex = getattr(f, "sex", None)  # 'M' / 'F'
+            if sex in ("M", "F"):
+                gender = sex
+            else:
+                g = getattr(f, "gender", None)  # 1 = male, 0 = female
+                if g is not None:
+                    gender = "M" if int(g) == 1 else "F"
             results.append(
                 DetectedFace(
                     bbox=BBox(
@@ -76,6 +86,8 @@ class RealFaceService:
                     ),
                     # normed_embedding is already L2-normalized (512-d).
                     embedding=f.normed_embedding.astype(float).tolist(),
+                    age=float(age) if age is not None else None,
+                    gender=gender,
                 )
             )
         return results

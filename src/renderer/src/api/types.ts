@@ -112,6 +112,17 @@ export interface RelationSuggestion {
   a_name: string | null
   b_name: string | null
 }
+export interface FamilySuggestion {
+  parent: number
+  child: number
+  parent_age: number
+  child_age: number
+  gap: number
+  shared: number
+  parent_gender: string | null
+  parent_name: string | null
+  child_name: string | null
+}
 
 export type LibraryView = 'photos' | 'favorites' | 'archive' | 'hidden' | 'trash'
 export type SortKey = 'newest' | 'oldest' | 'favorites' | 'added'

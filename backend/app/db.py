@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS faces (
     -- bounding box (normalized 0..1)
     bbox_x          REAL, bbox_y REAL, bbox_w REAL, bbox_h REAL,
     embedding       BLOB,                       -- float32 vector
+    age             REAL,                       -- estimated age (real backend only)
+    gender          TEXT,                       -- 'M' | 'F' (real backend only)
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_faces_media ON faces(media_id);
@@ -215,4 +217,7 @@ def init_db() -> None:
     conn.commit()
     # Upgrade older relationship tables created before `directed` existed.
     _ensure_column(conn, "relationships", "directed", "INTEGER NOT NULL DEFAULT 0")
+    # Age/gender columns for family (parent/child) suggestions (real backend).
+    _ensure_column(conn, "faces", "age", "REAL")
+    _ensure_column(conn, "faces", "gender", "TEXT")
     _migrate_stable_ids(conn)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Optional, Protocol, Sequence
 
 
 @dataclass
@@ -25,6 +25,9 @@ class BBox:
 class DetectedFace:
     bbox: BBox
     embedding: list[float]
+    # Estimated by the real backend; None for the stub (no age/gender signal).
+    age: Optional[float] = None
+    gender: Optional[str] = None  # 'M' | 'F'
 
 
 @dataclass

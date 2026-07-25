@@ -340,6 +340,11 @@ def get_relation_suggestions(limit: int = 8) -> dict:
     return {"suggestions": repository.relation_suggestions(limit)}
 
 
+@app.get("/api/relations/family-suggestions")
+def get_family_suggestions() -> dict:
+    return {"suggestions": repository.family_suggestions()}
+
+
 class AutoConnectIn(BaseModel):
     min_shared: int = 2
     label: str = "appears with"
