@@ -52,7 +52,7 @@ export default function AlbumsPage(): JSX.Element {
 
       {albums.length === 0 && (
         <Typography color="text.secondary">
-          No albums yet. Create one, then add photos from the viewer.
+          No albums yet. Create one, then open it and use “Add photos”.
         </Typography>
       )}
 

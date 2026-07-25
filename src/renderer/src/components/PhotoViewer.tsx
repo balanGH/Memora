@@ -10,9 +10,19 @@ import {
   Chip,
   Stack,
   Avatar,
-  TextField
+  TextField,
+  Menu,
+  MenuItem,
+  Snackbar,
+  Alert,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
+import LibraryAddIcon from '@mui/icons-material/LibraryAdd'
 import { useNavigate } from 'react-router-dom'
 import CloseIcon from '@mui/icons-material/Close'
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft'
@@ -26,7 +36,7 @@ import ZoomInIcon from '@mui/icons-material/ZoomIn'
 import ZoomOutIcon from '@mui/icons-material/ZoomOut'
 import PlaceIcon from '@mui/icons-material/Place'
 import { api, displayUrl, fileUrl, personFaceUrl, thumbUrl } from '../api/client'
-import type { MediaItem, MediaDetail } from '../api/types'
+import type { MediaItem, MediaDetail, Album } from '../api/types'
 
 interface Props {
   items: MediaItem[]
@@ -48,6 +58,11 @@ export default function PhotoViewer({
   const [detail, setDetail] = useState<MediaDetail | null>(null)
   const [showInfo, setShowInfo] = useState(false)
   const [tagInput, setTagInput] = useState('')
+  const [albumAnchor, setAlbumAnchor] = useState<null | HTMLElement>(null)
+  const [albums, setAlbums] = useState<Album[]>([])
+  const [newAlbumOpen, setNewAlbumOpen] = useState(false)
+  const [newAlbumName, setNewAlbumName] = useState('')
+  const [toast, setToast] = useState<string | null>(null)
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const dragging = useRef<{ x: number; y: number } | null>(null)
@@ -89,6 +104,35 @@ export default function PhotoViewer({
     },
     [item]
   )
+
+  // --- add the current photo to an album -----------------------------------
+  const openAlbumMenu = useCallback((e: React.MouseEvent<HTMLElement>) => {
+    setAlbumAnchor(e.currentTarget)
+    api.albums().then((r) => setAlbums(r.albums))
+  }, [])
+
+  const addToAlbum = useCallback(
+    async (album: Album) => {
+      if (!item) return
+      setAlbumAnchor(null)
+      const r = await api.addToAlbum(album.id, [item.id])
+      setToast(
+        r.added > 0 ? `Added to “${album.name}”` : `Already in “${album.name}”`
+      )
+    },
+    [item]
+  )
+
+  const createAndAdd = useCallback(async () => {
+    const name = newAlbumName.trim()
+    if (!name || !item) return
+    const { id } = await api.createAlbum(name)
+    await api.addToAlbum(id, [item.id])
+    setNewAlbumName('')
+    setNewAlbumOpen(false)
+    setAlbumAnchor(null)
+    setToast(`Added to new album “${name}”`)
+  }, [newAlbumName, item])
 
   useEffect(() => {
     reset()
@@ -182,6 +226,11 @@ export default function PhotoViewer({
           <Tooltip title="Favorite (f)">
             <IconButton onClick={() => toggleFlag('is_favorite')} sx={{ color: '#fff' }}>
               {item.is_favorite ? <FavoriteIcon color="error" /> : <FavoriteBorderIcon />}
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Add to album">
+            <IconButton onClick={openAlbumMenu} sx={{ color: '#fff' }}>
+              <LibraryAddIcon />
             </IconButton>
           </Tooltip>
           <Tooltip title="Archive">
@@ -425,6 +474,72 @@ export default function PhotoViewer({
             )}
           </Box>
         </Drawer>
+
+        {/* Add-to-album menu */}
+        <Menu
+          anchorEl={albumAnchor}
+          open={!!albumAnchor}
+          onClose={() => setAlbumAnchor(null)}
+          sx={{ zIndex: (t) => t.zIndex.modal + 2 }}
+        >
+          {albums.length === 0 && (
+            <MenuItem disabled>No albums yet</MenuItem>
+          )}
+          {albums.map((a) => (
+            <MenuItem key={a.id} onClick={() => addToAlbum(a)}>
+              {a.name}
+            </MenuItem>
+          ))}
+          <Divider />
+          <MenuItem
+            onClick={() => {
+              setAlbumAnchor(null)
+              setNewAlbumOpen(true)
+            }}
+          >
+            <AddIcon fontSize="small" sx={{ mr: 1 }} /> New album…
+          </MenuItem>
+        </Menu>
+
+        {/* New-album dialog */}
+        <Dialog
+          open={newAlbumOpen}
+          onClose={() => setNewAlbumOpen(false)}
+          sx={{ zIndex: (t) => t.zIndex.modal + 2 }}
+        >
+          <DialogTitle>New album</DialogTitle>
+          <DialogContent>
+            <TextField
+              autoFocus
+              fullWidth
+              label="Album name"
+              value={newAlbumName}
+              onChange={(e) => setNewAlbumName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && createAndAdd()}
+              sx={{ mt: 1 }}
+            />
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setNewAlbumOpen(false)}>Cancel</Button>
+            <Button variant="contained" onClick={createAndAdd}>
+              Create & add
+            </Button>
+          </DialogActions>
+        </Dialog>
+
+        <Snackbar
+          open={!!toast}
+          autoHideDuration={3000}
+          onClose={() => setToast(null)}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+          sx={{ zIndex: (t) => t.zIndex.modal + 3 }}
+        >
+          {toast ? (
+            <Alert severity="success" onClose={() => setToast(null)}>
+              {toast}
+            </Alert>
+          ) : undefined}
+        </Snackbar>
       </Box>
     </Modal>
   )
