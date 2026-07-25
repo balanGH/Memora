@@ -178,6 +178,25 @@ def set_person_hidden(person_id: int, hidden: bool) -> bool:
     return True
 
 
+def set_person_cover(person_id: int, media_id: int) -> bool:
+    """Pick which photo supplies the person's avatar face crop.
+
+    Only succeeds if the person actually has a detected face in that photo, so
+    the crop endpoint always has a bbox to work with.
+    """
+    with transaction() as conn:
+        has_face = conn.execute(
+            "SELECT 1 FROM faces WHERE person_id = ? AND media_id = ? LIMIT 1",
+            (person_id, media_id),
+        ).fetchone()
+        if not has_face:
+            return False
+        conn.execute(
+            "UPDATE people SET cover_media_id = ? WHERE id = ?", (media_id, person_id)
+        )
+    return True
+
+
 def merge_people(source_id: int, target_id: int) -> bool:
     """Reassign all faces from source person to target, then delete source."""
     if source_id == target_id:
@@ -188,6 +207,36 @@ def merge_people(source_id: int, target_id: int) -> bool:
         )
         conn.execute("DELETE FROM people WHERE id = ?", (source_id,))
     return True
+
+
+def split_person(person_id: int, media_ids: list[int]) -> Optional[int]:
+    """Move this person's faces in the given photos to a brand-new person.
+
+    Used to correct a cluster that wrongly groups different people: select the
+    photos that don't belong and they become a separate person. Returns the new
+    person id, or None if nothing moved.
+    """
+    if not media_ids:
+        return None
+    with transaction() as conn:
+        new_id = conn.execute("INSERT INTO people (name) VALUES (NULL)").lastrowid
+        placeholders = ",".join("?" * len(media_ids))
+        moved = conn.execute(
+            f"""UPDATE faces SET person_id = ?
+                WHERE person_id = ? AND media_id IN ({placeholders})""",
+            (new_id, person_id, *media_ids),
+        ).rowcount
+        if moved == 0:
+            conn.execute("DELETE FROM people WHERE id = ?", (new_id,))
+            return None
+        # If the source's chosen cover moved out, clear it (crop falls back to
+        # the largest remaining face).
+        conn.execute(
+            f"""UPDATE people SET cover_media_id = NULL
+                WHERE id = ? AND cover_media_id IN ({placeholders})""",
+            (person_id, *media_ids),
+        )
+    return new_id
 
 
 def media_for_person(person_id: int, limit: int = 500) -> list[dict]:

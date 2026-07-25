@@ -34,8 +34,9 @@ export function fileUrl(id: number): string {
 export function displayUrl(id: number): string {
   return `${baseUrl}/api/display/${id}`
 }
-export function personFaceUrl(personId: number): string {
-  return `${baseUrl}/api/people/${personId}/face`
+export function personFaceUrl(personId: number, mediaId?: number): string {
+  const base = `${baseUrl}/api/people/${personId}/face`
+  return mediaId ? `${base}?media_id=${mediaId}` : base
 }
 /** Leaflet tile template routed through the local caching proxy.
  *  style: 'light' | 'dark' | 'voyager' (CARTO basemaps). */
@@ -113,6 +114,16 @@ export const api = {
       body: JSON.stringify({ source_id: sourceId, target_id: targetId })
     }),
   personMedia: (id: number) => req<{ items: MediaItem[] }>(`/api/people/${id}/media`),
+  setPersonCover: (id: number, mediaId: number) =>
+    req<{ ok: boolean }>(`/api/people/${id}/cover`, {
+      method: 'POST',
+      body: JSON.stringify({ media_id: mediaId })
+    }),
+  splitPerson: (id: number, mediaIds: number[]) =>
+    req<{ new_person_id: number | null }>(`/api/people/${id}/split`, {
+      method: 'POST',
+      body: JSON.stringify({ media_ids: mediaIds })
+    }),
 
   // search
   search: (q: string) =>

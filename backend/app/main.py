@@ -244,9 +244,27 @@ def post_merge(body: MergeIn) -> dict:
     return {"ok": ok}
 
 
+class SplitIn(BaseModel):
+    media_ids: list[int]
+
+
+@app.post("/api/people/{person_id}/split")
+def post_split(person_id: int, body: SplitIn) -> dict:
+    return {"new_person_id": repository.split_person(person_id, body.media_ids)}
+
+
 @app.get("/api/people/{person_id}/media")
 def get_person_media(person_id: int) -> dict:
     return {"items": repository.media_for_person(person_id)}
+
+
+class CoverIn(BaseModel):
+    media_id: int
+
+
+@app.post("/api/people/{person_id}/cover")
+def post_person_cover(person_id: int, body: CoverIn) -> dict:
+    return {"ok": repository.set_person_cover(person_id, body.media_id)}
 
 
 class ExportPersonIn(BaseModel):
@@ -263,20 +281,42 @@ def post_export_person(body: ExportPersonIn) -> dict:
 
 
 @app.get("/api/people/{person_id}/face")
-def get_person_face(person_id: int):
-    """Return a cropped face thumbnail for the person's cover face.
+def get_person_face(person_id: int, media_id: int | None = None):
+    """Return a cropped face thumbnail for the person.
 
-    Falls back to a 404 (frontend then shows the generic avatar / photo thumb),
-    e.g. when faces have no bbox (stub backend produces boxes too, but real
-    InsightFace boxes make this look right).
+    Which face is used:
+      * ``media_id`` given  -> that photo's face (used by the thumbnail picker),
+      * else the person's chosen cover photo if set,
+      * else the largest detected face.
+    404 (frontend then shows the generic avatar / photo thumb) when there's no
+    usable bbox.
     """
-    row = get_conn().execute(
-        """SELECT m.path AS path, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h
-           FROM faces f JOIN media m ON m.id = f.media_id
-           WHERE f.person_id = ? AND f.bbox_w IS NOT NULL AND f.bbox_w > 0
-           ORDER BY (f.bbox_w * f.bbox_h) DESC LIMIT 1""",
-        (person_id,),
-    ).fetchone()
+    conn = get_conn()
+    if media_id is None:
+        cover = conn.execute(
+            "SELECT cover_media_id FROM people WHERE id = ?", (person_id,)
+        ).fetchone()
+        if cover and cover["cover_media_id"]:
+            media_id = cover["cover_media_id"]
+
+    row = None
+    if media_id is not None:
+        row = conn.execute(
+            """SELECT m.path AS path, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h
+               FROM faces f JOIN media m ON m.id = f.media_id
+               WHERE f.person_id = ? AND f.media_id = ?
+                 AND f.bbox_w IS NOT NULL AND f.bbox_w > 0
+               ORDER BY (f.bbox_w * f.bbox_h) DESC LIMIT 1""",
+            (person_id, media_id),
+        ).fetchone()
+    if row is None:  # no chosen face (or it had no bbox) -> largest overall
+        row = conn.execute(
+            """SELECT m.path AS path, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h
+               FROM faces f JOIN media m ON m.id = f.media_id
+               WHERE f.person_id = ? AND f.bbox_w IS NOT NULL AND f.bbox_w > 0
+               ORDER BY (f.bbox_w * f.bbox_h) DESC LIMIT 1""",
+            (person_id,),
+        ).fetchone()
     if not row or not Path(row["path"]).exists():
         raise HTTPException(status_code=404, detail="No face crop available")
     data = crop_face(
