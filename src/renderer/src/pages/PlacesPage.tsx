@@ -4,6 +4,7 @@ import PublicIcon from '@mui/icons-material/Public'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import PhotoViewer from '../components/PhotoViewer'
+import { heatLayer, type HeatPoint } from '../components/heatLayer'
 import { api, thumbUrl, tileUrlTemplate } from '../api/client'
 import type { MediaItem } from '../api/types'
 import { useColorMode } from '../context/ColorModeContext'
@@ -22,6 +23,14 @@ const ACTIVE_STYLE: L.CircleMarkerOptions = {
   fillColor: '#ea4335',
   fillOpacity: 1
 }
+// Zero-footprint marker: invisible, but still anchors the photo-preview tooltip
+// (used in pins mode where the red base dot already marks the spot).
+const INVISIBLE_STYLE: L.CircleMarkerOptions = {
+  radius: 0,
+  weight: 0,
+  opacity: 0,
+  fillOpacity: 0
+}
 
 function dateLabel(taken: string | null): string {
   if (!taken) return ''
@@ -37,6 +46,8 @@ export default function PlacesPage(): JSX.Element {
   const mapRef = useRef<L.Map | null>(null)
   const tileLayerRef = useRef<L.TileLayer | null>(null)
   const markersRef = useRef<L.CircleMarker[]>([])
+  const heatRef = useRef<L.Layer | null>(null)
+  const activeMarkerRef = useRef<L.CircleMarker | null>(null)
   const stripRef = useRef<HTMLDivElement>(null)
   const scrollRaf = useRef<number | null>(null)
   const suppressScroll = useRef(false)
@@ -46,6 +57,7 @@ export default function PlacesPage(): JSX.Element {
   const [viewerIndex, setViewerIndex] = useState<number | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [sort, setSort] = useState<'newest' | 'oldest'>('newest')
+  const [viewMode, setViewMode] = useState<'heat' | 'pins'>('heat')
 
   // --- init map once -------------------------------------------------------
   useEffect(() => {
@@ -92,22 +104,46 @@ export default function PlacesPage(): JSX.Element {
   useEffect(() => {
     const map = mapRef.current
     if (!map) return
+    // clear every overlay so switching modes leaves nothing behind
     markersRef.current.forEach((m) => m.remove())
     markersRef.current = []
+    if (heatRef.current) {
+      heatRef.current.remove()
+      heatRef.current = null
+    }
+    if (activeMarkerRef.current) {
+      activeMarkerRef.current.remove()
+      activeMarkerRef.current = null
+    }
     if (items.length === 0) return
 
-    const latlngs: L.LatLngExpression[] = []
-    items.forEach((item, i) => {
-      const marker = L.circleMarker([item.gps_lat!, item.gps_lon!], BASE_STYLE)
-        .addTo(map)
-        .on('click', () => selectItem(i, { fromMap: true }))
-      marker.bindTooltip(item.filename, { direction: 'top' })
-      markersRef.current.push(marker)
-      latlngs.push([item.gps_lat!, item.gps_lon!])
-    })
+    const latlngs = items.map(
+      (it) => [it.gps_lat!, it.gps_lon!] as L.LatLngExpression
+    )
+
+    if (viewMode === 'heat') {
+      const points: HeatPoint[] = items.map((it) => ({
+        lat: it.gps_lat!,
+        lng: it.gps_lon!,
+        value: 1
+      }))
+      heatRef.current = heatLayer(points, {
+        radius: 15,
+        blur: 10,
+        minOpacity: 0.4
+      }).addTo(map)
+    } else {
+      items.forEach((item, i) => {
+        const marker = L.circleMarker([item.gps_lat!, item.gps_lon!], BASE_STYLE)
+          .addTo(map)
+          .on('click', () => selectItem(i, { fromMap: true }))
+        marker.bindTooltip(item.filename, { direction: 'top' })
+        markersRef.current.push(marker)
+      })
+    }
     map.fitBounds(L.latLngBounds(latlngs).pad(0.2), { maxZoom: 12 })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items])
+  }, [items, viewMode])
 
   // --- selection drives both map and strip ---------------------------------
   const selectItem = useCallback(
@@ -116,15 +152,39 @@ export default function PlacesPage(): JSX.Element {
       const map = mapRef.current
       const item = items[i]
       if (map && item) {
-        map.flyTo([item.gps_lat!, item.gps_lon!], Math.max(map.getZoom(), 14), {
-          duration: 0.6
-        })
+        const ll: L.LatLngExpression = [item.gps_lat!, item.gps_lon!]
+        map.flyTo(ll, Math.max(map.getZoom(), 14), { duration: 0.6 })
+        if (viewMode === 'pins') {
+          markersRef.current.forEach((m, idx) =>
+            m.setStyle(idx === i ? ACTIVE_STYLE : BASE_STYLE)
+          )
+          markersRef.current[i]?.bringToFront()
+        }
+        // A marker at the active spot carries the photo preview tooltip. In heat
+        // mode it's also the visible highlight; in pins mode it's invisible and
+        // just holds the preview above the red dot.
+        const style = viewMode === 'heat' ? ACTIVE_STYLE : INVISIBLE_STYLE
+        if (!activeMarkerRef.current) {
+          activeMarkerRef.current = L.circleMarker(ll, style).addTo(map)
+        } else {
+          activeMarkerRef.current.setLatLng(ll).setStyle(style)
+        }
+        const html = `<img src="${thumbUrl(item.id)}" alt="" /><div class="memora-map-thumb-date">${dateLabel(
+          item.taken_at
+        )}</div>`
+        if (activeMarkerRef.current.getTooltip()) {
+          activeMarkerRef.current.setTooltipContent(html)
+        } else {
+          activeMarkerRef.current.bindTooltip(html, {
+            permanent: true,
+            direction: 'top',
+            offset: [0, -6],
+            className: 'memora-map-thumb'
+          })
+        }
+        activeMarkerRef.current.openTooltip()
+        activeMarkerRef.current.bringToFront()
       }
-      // restyle markers
-      markersRef.current.forEach((m, idx) =>
-        m.setStyle(idx === i ? ACTIVE_STYLE : BASE_STYLE)
-      )
-      markersRef.current[i]?.bringToFront()
       // scroll the strip to this item (unless the scroll itself triggered us)
       if (!opts.fromScroll) {
         suppressScroll.current = true
@@ -133,8 +193,46 @@ export default function PlacesPage(): JSX.Element {
         setTimeout(() => (suppressScroll.current = false), 500)
       }
     },
-    [items]
+    [items, viewMode]
   )
+
+  // --- clicking the heatmap selects the nearest photo ----------------------
+  // The heat canvas has no per-point markers, so map clicks find the closest
+  // photo (within a pixel threshold) and behave like clicking a pin.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || viewMode !== 'heat') return
+
+    const nearest = (latlng: L.LatLng): number => {
+      const target = map.latLngToContainerPoint(latlng)
+      let best = -1
+      let bestDist = 34 // px threshold — ignore clicks on empty map
+      items.forEach((it, i) => {
+        const p = map.latLngToContainerPoint([it.gps_lat!, it.gps_lon!])
+        const dist = target.distanceTo(p)
+        if (dist < bestDist) {
+          bestDist = dist
+          best = i
+        }
+      })
+      return best
+    }
+
+    const onClick = (e: L.LeafletMouseEvent): void => {
+      const idx = nearest(e.latlng)
+      if (idx >= 0) selectItem(idx, { fromMap: true })
+    }
+    const onDbl = (e: L.LeafletMouseEvent): void => {
+      const idx = nearest(e.latlng)
+      if (idx >= 0) setViewerIndex(idx)
+    }
+    map.on('click', onClick)
+    map.on('dblclick', onDbl)
+    return () => {
+      map.off('click', onClick)
+      map.off('dblclick', onDbl)
+    }
+  }, [viewMode, items, selectItem])
 
   // --- scrolling the strip picks the centered photo ------------------------
   const onStripScroll = useCallback(() => {
@@ -172,6 +270,15 @@ export default function PlacesPage(): JSX.Element {
           <ToggleButtonGroup
             size="small"
             exclusive
+            value={viewMode}
+            onChange={(_, v) => v && setViewMode(v)}
+          >
+            <ToggleButton value="heat">Heatmap</ToggleButton>
+            <ToggleButton value="pins">Pins</ToggleButton>
+          </ToggleButtonGroup>
+          <ToggleButtonGroup
+            size="small"
+            exclusive
             value={sort}
             onChange={(_, v) => v && setSort(v)}
           >
@@ -180,14 +287,56 @@ export default function PlacesPage(): JSX.Element {
           </ToggleButtonGroup>
         </Stack>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-          Scroll the timeline to fly the map to where each photo was taken. Click a map pin
-          to jump the timeline. Double-click a photo to open it.
+          {viewMode === 'heat'
+            ? 'Warmer areas hold more photos. Scroll the timeline to fly to where each photo was taken; double-click a photo to open it.'
+            : 'Scroll the timeline to fly the map to where each photo was taken. Click a map pin to jump the timeline. Double-click a photo to open it.'}
         </Typography>
       </Box>
 
       {/* Interactive map */}
       <Box sx={{ flex: 1, minHeight: 0, position: 'relative', mx: 3, borderRadius: 3, overflow: 'hidden' }}>
         <Box ref={mapElRef} sx={{ position: 'absolute', inset: 0 }} />
+
+        {/* Heatmap intensity legend */}
+        {viewMode === 'heat' && items.length > 0 && (
+          <Box
+            sx={{
+              position: 'absolute',
+              left: 12,
+              bottom: 12,
+              zIndex: 500,
+              px: 1.25,
+              py: 1,
+              borderRadius: 2,
+              bgcolor: 'background.paper',
+              boxShadow: 3,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 0.5,
+              width: 148
+            }}
+          >
+            <Typography variant="caption" sx={{ fontWeight: 600 }}>
+              Photo density
+            </Typography>
+            <Box
+              sx={{
+                height: 8,
+                borderRadius: 1,
+                background:
+                  'linear-gradient(90deg, #2980b9, #16a085, #f1c40f, #e67e22, #e74c3c)'
+              }}
+            />
+            <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+              <Typography variant="caption" color="text.secondary">
+                Fewer
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                More
+              </Typography>
+            </Box>
+          </Box>
+        )}
         {loaded && items.length === 0 && (
           <Box
             sx={{

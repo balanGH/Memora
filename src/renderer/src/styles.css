@@ -26,3 +26,25 @@ body,
 .memora-tile-img {
   animation: memora-fade-in 0.28s ease both;
 }
+
+/* Photo preview shown on the Places map at the active location */
+.leaflet-tooltip.memora-map-thumb {
+  padding: 3px;
+  border: none;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.4);
+}
+.leaflet-tooltip.memora-map-thumb img {
+  display: block;
+  width: 104px;
+  height: 78px;
+  object-fit: cover;
+  border-radius: 5px;
+}
+.leaflet-tooltip.memora-map-thumb .memora-map-thumb-date {
+  font: 500 11px/1.4 system-ui, sans-serif;
+  color: #333;
+  text-align: center;
+  padding-top: 2px;
+}
