@@ -15,6 +15,7 @@ import PhotoLibraryIcon from '@mui/icons-material/PhotoLibrary'
 import PeopleIcon from '@mui/icons-material/People'
 import SearchIcon from '@mui/icons-material/Search'
 import PublicIcon from '@mui/icons-material/Public'
+import HubIcon from '@mui/icons-material/Hub'
 import CollectionsBookmarkIcon from '@mui/icons-material/CollectionsBookmark'
 import FavoriteIcon from '@mui/icons-material/Favorite'
 import ArchiveIcon from '@mui/icons-material/Archive'
@@ -38,6 +39,7 @@ const NAV: NavEntry[] = [
   { to: '/people', label: 'People', icon: <PeopleIcon />, countKey: 'people' },
   { to: '/search', label: 'Search', icon: <SearchIcon /> },
   { to: '/places', label: 'Places', icon: <PublicIcon /> },
+  { to: '/relations', label: 'Relations', icon: <HubIcon /> },
   { to: '/albums', label: 'Albums', icon: <CollectionsBookmarkIcon /> },
   { to: '/favorites', label: 'Favorites', icon: <FavoriteIcon />, countKey: 'favorites' },
   { to: '/archive', label: 'Archive', icon: <ArchiveIcon />, countKey: 'archived' },

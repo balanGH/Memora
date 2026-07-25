@@ -88,5 +88,30 @@ export interface Place {
   latest: string | null
 }
 
+export interface RelationNode {
+  id: number
+  name: string | null
+  cover_media_id: number | null
+  photo_count?: number
+}
+export interface RelationEdge {
+  id: number
+  person_a: number
+  person_b: number
+  label: string
+  directed: number
+}
+export interface RelationGraph {
+  nodes: RelationNode[]
+  edges: RelationEdge[]
+}
+export interface RelationSuggestion {
+  a: number
+  b: number
+  shared: number
+  a_name: string | null
+  b_name: string | null
+}
+
 export type LibraryView = 'photos' | 'favorites' | 'archive' | 'hidden' | 'trash'
 export type SortKey = 'newest' | 'oldest' | 'favorites' | 'added'

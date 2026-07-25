@@ -118,6 +118,18 @@ CREATE TABLE IF NOT EXISTS album_media (
     added_at        TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (album_id, media_id)
 );
+
+-- Manual, free-form relationships between people (friend, cousin, colleague…).
+-- Undirected: stored with person_a < person_b so each pair is unique.
+CREATE TABLE IF NOT EXISTS relationships (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_a        INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+    person_b        INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+    label           TEXT NOT NULL DEFAULT '',
+    directed        INTEGER NOT NULL DEFAULT 0,   -- 1: person_a -> person_b (e.g. parent->child)
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (person_a, person_b)
+);
 """
 
 
@@ -188,9 +200,19 @@ def _migrate_stable_ids(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys=ON;")
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    """Add a column to an existing table if it's missing (lightweight migration)."""
+    cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        conn.commit()
+
+
 def init_db() -> None:
     """Create tables if they don't exist."""
     conn = get_conn()
     conn.executescript(SCHEMA)
     conn.commit()
+    # Upgrade older relationship tables created before `directed` existed.
+    _ensure_column(conn, "relationships", "directed", "INTEGER NOT NULL DEFAULT 0")
     _migrate_stable_ids(conn)

@@ -478,6 +478,165 @@ def media_for_place(key: str, limit: int = 500) -> list[dict]:
     return matched[:limit]
 
 
+# ------------------------------------------------------------- Relations ----
+
+def add_relation(
+    person_a: int, person_b: int, label: str = "", directed: bool = False
+) -> dict:
+    """Create/update a labeled link between two people.
+
+    Directed links (parent->child) keep the given a->b order; undirected links
+    (spouse, friend…) are stored with person_a < person_b so each pair is unique
+    regardless of which side the user picked first.
+    """
+    if person_a == person_b:
+        raise ValueError("A person can't be related to themselves")
+    if directed:
+        a, b = person_a, person_b
+    else:
+        a, b = (person_a, person_b) if person_a < person_b else (person_b, person_a)
+    label = label.strip()
+    with transaction() as conn:
+        # A pair is unique in either order — replace an existing reverse row too.
+        conn.execute(
+            "DELETE FROM relationships WHERE (person_a = ? AND person_b = ?) "
+            "OR (person_a = ? AND person_b = ?)",
+            (a, b, b, a),
+        )
+        cur = conn.execute(
+            "INSERT INTO relationships (person_a, person_b, label, directed) "
+            "VALUES (?, ?, ?, ?)",
+            (a, b, label, int(directed)),
+        )
+        rid = cur.lastrowid
+        row = conn.execute(
+            "SELECT id, person_a, person_b, label, directed FROM relationships WHERE id = ?",
+            (rid,),
+        ).fetchone()
+    return dict(row)
+
+
+def delete_relation(rel_id: int) -> bool:
+    with transaction() as conn:
+        cur = conn.execute("DELETE FROM relationships WHERE id = ?", (rel_id,))
+    return cur.rowcount > 0
+
+
+def relation_graph() -> dict:
+    """Nodes (people involved in any relationship) + edges for the graph view."""
+    conn = get_conn()
+    edges = [
+        dict(e)
+        for e in conn.execute(
+            "SELECT id, person_a, person_b, label, directed FROM relationships"
+        ).fetchall()
+    ]
+    ids: set[int] = set()
+    for e in edges:
+        ids.add(e["person_a"])
+        ids.add(e["person_b"])
+    nodes: list[dict] = []
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        nodes = [
+            dict(r)
+            for r in conn.execute(
+                f"""SELECT p.id, p.name, p.cover_media_id,
+                          COUNT(DISTINCT f.media_id) AS photo_count
+                   FROM people p LEFT JOIN faces f ON f.person_id = p.id
+                   WHERE p.id IN ({placeholders})
+                   GROUP BY p.id""",
+                tuple(ids),
+            ).fetchall()
+        ]
+    return {"nodes": nodes, "edges": edges}
+
+
+def auto_connect(min_shared: int = 2, label: str = "appears with") -> int:
+    """Auto-create undirected links for people who appear together in at least
+    ``min_shared`` photos and aren't already related. Returns the count created.
+
+    Only who-is-connected is inferred (photos can't reveal the relationship
+    type), so the links get a generic label the user can rename afterwards.
+    """
+    conn = get_conn()
+    existing: set[tuple[int, int]] = set()
+    for r in conn.execute("SELECT person_a, person_b FROM relationships").fetchall():
+        existing.add((r["person_a"], r["person_b"]))
+        existing.add((r["person_b"], r["person_a"]))
+
+    pairs = conn.execute(
+        """SELECT f1.person_id AS a, f2.person_id AS b,
+                  COUNT(DISTINCT f1.media_id) AS shared
+           FROM faces f1
+           JOIN faces f2
+             ON f1.media_id = f2.media_id AND f1.person_id < f2.person_id
+           WHERE f1.person_id IS NOT NULL AND f2.person_id IS NOT NULL
+           GROUP BY f1.person_id, f2.person_id
+           HAVING shared >= ?""",
+        (max(1, min_shared),),
+    ).fetchall()
+
+    created = 0
+    with transaction() as tx:
+        for r in pairs:
+            if (r["a"], r["b"]) in existing:
+                continue
+            tx.execute(
+                "INSERT OR IGNORE INTO relationships (person_a, person_b, label, directed) "
+                "VALUES (?, ?, ?, 0)",
+                (r["a"], r["b"], label),
+            )
+            created += 1
+    return created
+
+
+def relation_suggestions(limit: int = 8) -> list[dict]:
+    """Suggest links from face co-occurrence: people photographed together most,
+    excluding pairs that already have a relationship."""
+    conn = get_conn()
+    existing: set[tuple[int, int]] = set()
+    for r in conn.execute("SELECT person_a, person_b FROM relationships").fetchall():
+        existing.add((r["person_a"], r["person_b"]))
+        existing.add((r["person_b"], r["person_a"]))
+
+    rows = conn.execute(
+        """SELECT f1.person_id AS a, f2.person_id AS b,
+                  COUNT(DISTINCT f1.media_id) AS shared
+           FROM faces f1
+           JOIN faces f2
+             ON f1.media_id = f2.media_id AND f1.person_id < f2.person_id
+           WHERE f1.person_id IS NOT NULL AND f2.person_id IS NOT NULL
+           GROUP BY f1.person_id, f2.person_id
+           HAVING shared > 0
+           ORDER BY shared DESC
+           LIMIT ?""",
+        (limit * 4,),
+    ).fetchall()
+
+    picked = [
+        {"a": r["a"], "b": r["b"], "shared": r["shared"]}
+        for r in rows
+        if (r["a"], r["b"]) not in existing
+    ][:limit]
+
+    ids: set[int] = set()
+    for p in picked:
+        ids.add(p["a"])
+        ids.add(p["b"])
+    names: dict[int, Optional[str]] = {}
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        for r in conn.execute(
+            f"SELECT id, name FROM people WHERE id IN ({placeholders})", tuple(ids)
+        ).fetchall():
+            names[r["id"]] = r["name"]
+    for p in picked:
+        p["a_name"] = names.get(p["a"])
+        p["b_name"] = names.get(p["b"])
+    return picked
+
+
 # ---------------------------------------------------------------- Export ----
 
 def export_person(person_id: int, dest: str) -> dict:

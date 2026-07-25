@@ -328,6 +328,52 @@ def get_person_face(person_id: int, media_id: int | None = None):
     return Response(content=data, media_type="image/webp", headers=_REVALIDATE)
 
 
+# ---------------------------------------------------------- Relations -------
+
+@app.get("/api/relations")
+def get_relations() -> dict:
+    return repository.relation_graph()
+
+
+@app.get("/api/relations/suggestions")
+def get_relation_suggestions(limit: int = 8) -> dict:
+    return {"suggestions": repository.relation_suggestions(limit)}
+
+
+class AutoConnectIn(BaseModel):
+    min_shared: int = 2
+    label: str = "appears with"
+
+
+@app.post("/api/relations/auto")
+def post_auto_connect(body: AutoConnectIn) -> dict:
+    return {"created": repository.auto_connect(body.min_shared, body.label)}
+
+
+class RelationIn(BaseModel):
+    person_a: int
+    person_b: int
+    label: str = ""
+    directed: bool = False
+
+
+@app.post("/api/relations")
+def post_relation(body: RelationIn) -> dict:
+    try:
+        return {
+            "relation": repository.add_relation(
+                body.person_a, body.person_b, body.label, body.directed
+            )
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/relations/{rel_id}")
+def delete_relation(rel_id: int) -> dict:
+    return {"ok": repository.delete_relation(rel_id)}
+
+
 # ------------------------------------------------------------- Search -------
 
 @app.get("/api/search")

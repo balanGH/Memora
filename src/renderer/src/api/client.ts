@@ -8,6 +8,9 @@ import type {
   MediaPage,
   Person,
   Place,
+  RelationEdge,
+  RelationGraph,
+  RelationSuggestion,
   ScanState,
   SortKey
 } from './types'
@@ -147,6 +150,28 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ person_id: personId, dest })
     }),
+
+  // relations
+  relations: () => req<RelationGraph>('/api/relations'),
+  relationSuggestions: () =>
+    req<{ suggestions: RelationSuggestion[] }>('/api/relations/suggestions'),
+  autoConnectRelations: (minShared: number) =>
+    req<{ created: number }>('/api/relations/auto', {
+      method: 'POST',
+      body: JSON.stringify({ min_shared: minShared })
+    }),
+  addRelation: (personA: number, personB: number, label: string, directed = false) =>
+    req<{ relation: RelationEdge }>('/api/relations', {
+      method: 'POST',
+      body: JSON.stringify({
+        person_a: personA,
+        person_b: personB,
+        label,
+        directed
+      })
+    }),
+  deleteRelation: (relId: number) =>
+    req<{ ok: boolean }>(`/api/relations/${relId}`, { method: 'DELETE' }),
 
   // albums
   albums: () => req<{ albums: Album[] }>('/api/albums'),
