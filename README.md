@@ -6,24 +6,28 @@ No cloud, no telemetry, no tracking.
 
 > **Status: working app.** The end-to-end core runs today: add folders → scan → generate
 > thumbnails → browse a Google-Photos-style timeline → open the full-screen viewer (photos
-> **and video**, including HEIC). People, an interactive **Places** map, Albums, Search,
-> and per-person **Export** (preserving folder structure) all work. Object/scene tagging, OCR,
-> and CLIP-style search run on **deterministic stub models** so the app runs with zero
-> multi-GB downloads; **real InsightFace face recognition** is wired and flips on with one
-> env var. Swapping in real YOLO / CLIP / PaddleOCR later requires no changes to callers.
+> **and video**, including HEIC). People (merge / split / choose-thumbnail / hide+unhide),
+> an interactive **Places** map with a **heatmap**, a **Relations** graph (interactive +
+> tree view, with automatic co-occurrence and age-based family suggestions), Albums (bulk
+> picker + add-from-viewer), editable per-photo **Tags**, Search, and per-person **Export**
+> (preserving folder structure) all work. Object/scene tagging, OCR, and CLIP-style search
+> run on **deterministic stub models** so the app runs with zero multi-GB downloads;
+> **real InsightFace face recognition** (with age/gender for family suggestions) is wired and
+> flips on with one env var. Swapping in real YOLO / CLIP / PaddleOCR later requires no
+> changes to callers.
 
 ## Architecture
 
 ```
 ┌────────────────────────── Electron (main process) ──────────────────────────┐
-│  • Spawns the Python backend on localhost      • Native folder picker          │
-│  • Creates the app window                      • System theme detection        │
-└───────────────┬───────────────────────────────────────────────────────────────┘
+│  • Spawns the Python backend on localhost      • Native folder picker       │
+│  • Creates the app window                      • System theme detection     │
+└───────────────┬─────────────────────────────────────────────────────────────┘
                 │ contextBridge (preload)
 ┌───────────────▼──────────────┐        HTTP (127.0.0.1)        ┌────────────────┐
-│  Renderer: React + TS + MUI  │  ───────────────────────────► │  FastAPI (Py)  │
+│  Renderer: React + TS + MUI  │  ───────────────────────────►  │  FastAPI (Py)  │
 │  • Timeline (virtual scroll) │                                │  • SQLite      │
-│  • Photo viewer / People /   │  ◄─────────────────────────── │  • Scanner     │
+│  • Photo viewer / People /   │  ◄───────────────────────────  │  • Scanner     │
 │    Search / Albums / Settings│        JSON + image bytes      │  • AI pipeline │
 └──────────────────────────────┘                                └────────────────┘
 ```
@@ -100,8 +104,16 @@ The **Places** tab shows every photo with GPS EXIF data on a real, pannable/zoom
 - Click a **map pin** to jump the timeline to that photo.
 - **Double-click** a filmstrip photo to open it full-screen.
 
-Backend: `GET /api/geo/media` returns all geotagged photos oldest-first (the timeline that
-drives the map). Photos need GPS EXIF (usually from a phone camera) to appear.
+**Heatmap vs. Pins.** A **Heatmap / Pins** toggle switches between a density heatmap (warmer
+= more photos in an area; the brush scales with zoom so points don't balloon when zoomed out)
+and classic clickable pins. As you scroll the timeline — or click the heatmap — a small photo
+**preview card** pops up at that location so you always know which photo you're on. A
+**Newest / Oldest** toggle controls the filmstrip order (`GET /api/geo/media?sort=newest|oldest`).
+The heatmap is a self-contained canvas layer — no external library — so it stays offline and
+CSP-safe.
+
+Backend: `GET /api/geo/media` returns geotagged photos (newest-first by default; the timeline
+that drives the map). Photos need GPS EXIF (usually from a phone camera) to appear.
 
 **Tile caching (offline after first view).** The map never talks to the internet directly.
 Leaflet requests tiles from the local backend (`GET /api/tile/{z}/{x}/{y}`); on a cache
@@ -115,6 +127,66 @@ just shows blank. Manage/clear the cache in **Settings → Map cache** (`GET /ap
 > cache miss (with a descriptive User-Agent per OSM's tile policy). The renderer only ever
 > talks to `127.0.0.1`, and your photos, files, and metadata never leave the machine.
 
+## People management
+
+The **People** page clusters faces automatically; you correct the grouping directly:
+
+- **Merge** — enter "Merge duplicates", select two or more heads that are the same person,
+  and merge them into one (a named person is kept as the merge target so the name survives).
+- **Split (Fix grouping)** — on a person's page, select photos that are *not* this person and
+  move them to a new person. The inverse of merge.
+- **Choose thumbnail** — click the avatar (✏️) on a person's page to pick which photo supplies
+  their face crop; the default is the largest detected face.
+- **Hide / Unhide** — hide a person from the person page; a **Hidden (N)** toggle on the People
+  page reveals hidden people with an **Unhide** button.
+
+Endpoints: `POST /api/people/merge`, `POST /api/people/{id}/split`, `POST /api/people/{id}/cover`,
+`GET /api/people/{id}/face?media_id=…` (the picker crops each candidate photo), `POST /api/people/{id}/hide`.
+
+## Relations (people graph + family tree)
+
+The **Relations** tab links people with labeled relationships and visualizes them:
+
+- **Add / edit** a relation from a **grid of faces** (pick person → relationship → related
+  person). Relationship presets — **Parent of / Child of** (directed, drawn with arrows),
+  **Spouse, Sibling, Friend, Colleague, Custom** — are color-coded, shown in a grid.
+- **Interactive graph** — a self-contained force-directed layout: drag faces, scroll to zoom,
+  drag the background to pan, hover to focus a person's connections, click a face to open that
+  person. A **Recenter** button always brings the view back.
+- **Tree view** — a **Graph / Tree** toggle lays directed parent→child links into generation
+  rows (parents on top); spouses/siblings/friends stay on the same level.
+- **Auto-connect** — one click links everyone who appears together in at least *N* photos
+  (face co-occurrence), labeled "appears with" for you to rename. Photos reveal *who* is
+  connected, never the *type*.
+- **Suggestions** — "often photographed together" (co-occurrence) and, with the real backend,
+  **"possible parent → child"** from estimated ages. Suggestions are hints to confirm, never
+  auto-applied.
+- **Manage** — the relationships list supports per-row **edit** / **delete**, multi-select
+  **Delete selected**, and **Clear all**.
+
+Backend: `relationships` table (undirected pairs, optional `directed` flag); faces carry
+optional `age` / `gender` (real backend only) for family suggestions. Endpoints:
+`GET/POST /api/relations`, `DELETE /api/relations/{id}`, `GET /api/relations/suggestions`,
+`GET /api/relations/family-suggestions`, `POST /api/relations/auto`.
+
+## Editable tags
+
+Open a photo → **info (i)** → **Tags**. AI tags can be wrong (e.g. a group photo tagged
+"beach"), so each tag has an **✕ to delete** and there's an **"Add a tag"** field. Changes
+persist to SQLite immediately. Endpoints: `POST /api/media/{id}/tags`,
+`DELETE /api/media/{id}/tags/{tag_id}`.
+
+## Albums
+
+Create an album on the **Albums** page, then add photos two ways:
+
+- **Bulk** — open the album → **Add photos** → multi-select from a library picker (photos
+  already in the album are marked).
+- **While browsing** — in the photo viewer, **Add to album** (📚) files the current photo into
+  an existing album or a new one.
+
+Endpoints: `POST /api/albums`, `POST /api/albums/{id}/media` (idempotent; auto-sets the cover).
+
 ## Export people with folder structure
 
 From a person's page, **Export** copies all of that person's photos to a destination you
@@ -127,7 +199,7 @@ are preserved. A person appearing in both `Events/college/IndustrialVisit` and
 
 All state lives in **`~/.memora/`**:
 
-- `memora.db` — SQLite index (folders, media, faces, people, tags, albums)
+- `memora.db` — SQLite index (folders, media, faces, people, tags, albums, relationships)
 - `thumbnails/` — cached WebP thumbnails (images + video poster frames)
 - `display/` — cached JPEG renditions of HEIC/TIFF/… for the viewer
 - `tiles/` — cached OpenStreetMap tiles for the Places map (clear in Settings)
@@ -203,7 +275,10 @@ afterward is fully offline. The backend log prints:
 ```
 
 Now the **People** page shows real **cropped faces** (via `GET /api/people/{id}/face`),
-and the same person's photos genuinely cluster together.
+and the same person's photos genuinely cluster together. The real backend also records each
+face's **age** and **gender**, which powers the **"possible parent → child"** family
+suggestions on the **Relations** tab (the stub backend has no age data, so that row stays
+empty until you reprocess with InsightFace).
 
 ### 4. Tune clustering (optional)
 
@@ -240,16 +315,22 @@ do. No caller changes.
 | Timeline (day/month/year grouping, sort, virtual scroll) | ✅ Working |
 | Full-screen viewer (zoom, pan, EXIF panel, keyboard shortcuts) | ✅ Working |
 | Favorites / Archive / Hidden / Trash | ✅ Working |
-| Albums (manual) | ✅ Working |
-| People clustering, rename, hide, merge | ✅ Working (stub or real InsightFace) |
+| Albums — bulk picker + add-from-viewer | ✅ Working |
+| Editable per-photo tags (add / delete, persisted) | ✅ Working |
+| People clustering, rename, hide + **unhide** | ✅ Working (stub or real InsightFace) |
+| People **merge**, **split** (fix grouping), **choose thumbnail** | ✅ Working |
 | Real face recognition (InsightFace) + cropped-face avatars | ✅ Wired — enable via `MEMORA_FACE_BACKEND=insightface` |
+| Relations — interactive graph, tree view, edit/delete, suggestions | ✅ Working |
+| Relations — auto-connect (co-occurrence) + family (age) suggestions | ✅ Working (age needs real backend) |
 | Places — interactive Leaflet map + timeline filmstrip | ✅ Working |
+| Places — photo-density **heatmap** + preview cards + sort toggle | ✅ Working |
 | Map tiles proxied + cached on disk (offline after first view) | ✅ Working |
 | Export a person's photos preserving event folder structure | ✅ Working |
 | Search (people / object / scene / OCR / semantic) | ✅ Working (stub) |
 | Similar-image search | ✅ Working (stub) |
+| Stable media ids + no-cache media responses (thumbnail correctness) | ✅ Working |
 | Real YOLO / CLIP / PaddleOCR | 🔌 Interface ready, not wired |
-| Video thumbnails, non-destructive editing, GPS map view, packaging | 🚧 Planned |
+| Non-destructive editing, desktop packaging | 🚧 Planned |
 
 ## Keyboard shortcuts (viewer)
 
