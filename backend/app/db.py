@@ -124,6 +124,13 @@ CREATE TABLE IF NOT EXISTS album_media (
     PRIMARY KEY (album_id, media_id)
 );
 
+-- Files the user removed from the library ("Empty trash"). Memora never
+-- deletes originals, so this stops a rescan from re-importing them.
+CREATE TABLE IF NOT EXISTS excluded_paths (
+    path            TEXT PRIMARY KEY,
+    excluded_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Manual, free-form relationships between people (friend, cousin, colleague…).
 -- Undirected: stored with person_a < person_b so each pair is unique.
 CREATE TABLE IF NOT EXISTS relationships (

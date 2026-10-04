@@ -142,6 +142,155 @@ def set_flag(media_id: int, flag: str, value: bool) -> bool:
     return True
 
 
+_FLAGS = {"is_favorite", "is_archived", "is_hidden", "is_trashed"}
+
+
+def set_flag_bulk(media_ids: list[int], flag: str, value: bool) -> int:
+    """Set one flag on many media rows at once. Returns rows changed."""
+    if flag not in _FLAGS:
+        raise ValueError(f"Invalid flag: {flag}")
+    if not media_ids:
+        return 0
+    placeholders = ",".join("?" * len(media_ids))
+    with transaction() as conn:
+        if flag == "is_trashed":
+            cur = conn.execute(
+                f"""UPDATE media SET is_trashed = ?,
+                        trashed_at = CASE WHEN ? THEN datetime('now') ELSE NULL END
+                    WHERE id IN ({placeholders})""",
+                (int(value), int(value), *media_ids),
+            )
+        else:
+            cur = conn.execute(
+                f"UPDATE media SET {flag} = ? WHERE id IN ({placeholders})",
+                (int(value), *media_ids),
+            )
+    return cur.rowcount
+
+
+def restore_all_trash() -> int:
+    with transaction() as conn:
+        cur = conn.execute(
+            "UPDATE media SET is_trashed = 0, trashed_at = NULL WHERE is_trashed = 1"
+        )
+    return cur.rowcount
+
+
+def empty_trash() -> int:
+    """Remove trashed items from the library. Original files are NOT deleted.
+
+    Their paths go into ``excluded_paths`` so a rescan won't bring them back,
+    and cached thumbnails / display renditions are cleaned up.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, path, thumb_path FROM media WHERE is_trashed = 1"
+    ).fetchall()
+    if not rows:
+        return 0
+    from .media_utils import display_filename
+    from .config import DISPLAY_DIR
+
+    with transaction() as tx:
+        tx.executemany(
+            "INSERT OR IGNORE INTO excluded_paths(path) VALUES (?)",
+            [(r["path"],) for r in rows],
+        )
+        tx.execute("DELETE FROM media WHERE is_trashed = 1")
+        tx.execute(
+            "DELETE FROM people WHERE id NOT IN "
+            "(SELECT DISTINCT person_id FROM faces WHERE person_id IS NOT NULL)"
+        )
+    for r in rows:
+        for cached in (r["thumb_path"], str(DISPLAY_DIR / display_filename(Path(r["path"])))):
+            if cached:
+                try:
+                    Path(cached).unlink(missing_ok=True)
+                except OSError:
+                    pass
+    from .ai_pipeline import invalidate_person_index
+
+    invalidate_person_index()
+    return len(rows)
+
+
+def duplicate_groups(limit: int = 500) -> list[dict]:
+    """Exact duplicates (same file bytes) among non-trashed media."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT id, filename, kind, width, height, taken_at, thumb_path,
+                  is_favorite, path, size_bytes, file_hash
+           FROM media
+           WHERE is_trashed = 0 AND file_hash IN (
+               SELECT file_hash FROM media
+               WHERE file_hash IS NOT NULL AND is_trashed = 0
+               GROUP BY file_hash HAVING COUNT(*) > 1
+           )
+           ORDER BY file_hash, is_favorite DESC, taken_at ASC, id ASC"""
+    ).fetchall()
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        groups.setdefault(r["file_hash"], []).append(_media_dict(r))
+    out = [{"hash": h, "items": items} for h, items in groups.items()]
+    out.sort(key=lambda g: (g["items"][0].get("size_bytes") or 0), reverse=True)
+    return out[:limit]
+
+
+def timeline(view: str = "photos", sort: str = "newest") -> list[dict]:
+    """Month buckets in list order, each with the offset of its first item.
+
+    Lets the UI jump to any month: load pages up to ``offset`` then scroll.
+    Matches ``list_media`` ordering for the 'newest' and 'oldest' sorts.
+    """
+    conn = get_conn()
+    where = _VIEW_FILTER.get(view, _VIEW_FILTER["photos"])
+    order = "ASC" if sort == "oldest" else "DESC"
+    rows = conn.execute(
+        f"""SELECT substr(taken_at, 1, 7) AS month, COUNT(*) AS count
+            FROM media WHERE {where}
+            GROUP BY month
+            ORDER BY month {order}"""
+    ).fetchall()
+    out: list[dict] = []
+    offset = 0
+    for r in rows:
+        out.append({"month": r["month"], "count": r["count"], "offset": offset})
+        offset += r["count"]
+    return out
+
+
+def search_suggestions(query: str, limit: int = 6) -> dict:
+    """Quick matches for the search box: people names and tag labels."""
+    q = query.strip().lower()
+    if not q:
+        return {"people": [], "tags": []}
+    like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    conn = get_conn()
+    people = [
+        dict(r)
+        for r in conn.execute(
+            """SELECT p.id, p.name, COUNT(DISTINCT f.media_id) AS count
+               FROM people p JOIN faces f ON f.person_id = p.id
+               WHERE p.is_hidden = 0 AND p.name IS NOT NULL
+                 AND LOWER(p.name) LIKE ? ESCAPE '\\'
+               GROUP BY p.id ORDER BY count DESC LIMIT ?""",
+            (like, limit),
+        ).fetchall()
+    ]
+    tags = [
+        dict(r)
+        for r in conn.execute(
+            """SELECT LOWER(label) AS label, COUNT(DISTINCT media_id) AS count
+               FROM tags
+               WHERE kind IN ('object', 'scene', 'pet', 'user')
+                 AND LOWER(label) LIKE ? ESCAPE '\\'
+               GROUP BY LOWER(label) ORDER BY count DESC LIMIT ?""",
+            (like, limit),
+        ).fetchall()
+    ]
+    return {"people": people, "tags": tags}
+
+
 # ---------------------------------------------------------------- People ----
 
 def list_people(include_hidden: bool = False) -> list[dict]:
@@ -294,7 +443,7 @@ def media_for_person(person_id: int, limit: int = 500) -> list[dict]:
 
 # ---------------------------------------------------------------- Search ----
 
-def search(query: str, limit: int = 200) -> dict:
+def search(query: str, limit: int = 200, person_id: Optional[int] = None) -> dict:
     """Blended search: object/scene/OCR tags, people names, and semantic (CLIP).
 
     Every matching media id gets a score; results are ranked by score.
@@ -342,6 +491,17 @@ def search(query: str, limit: int = 200) -> dict:
 
     if not scores:
         return {"query": query, "items": []}
+
+    if person_id is not None:
+        with_person = {
+            r["media_id"]
+            for r in conn.execute(
+                "SELECT DISTINCT media_id FROM faces WHERE person_id = ?", (person_id,)
+            ).fetchall()
+        }
+        scores = {k: v for k, v in scores.items() if k in with_person}
+        if not scores:
+            return {"query": query, "items": []}
 
     top_ids = sorted(scores, key=lambda k: scores[k], reverse=True)[:limit]
     placeholders = ",".join("?" * len(top_ids))

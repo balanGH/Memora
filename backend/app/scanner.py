@@ -61,6 +61,26 @@ def add_folder(path: str) -> int:
         return row["id"]
 
 
+def remove_folder(folder_id: int) -> int:
+    """Forget a library folder and everything indexed from it.
+
+    Originals on disk are never touched. Returns how many media rows were
+    removed; faces, tags and album entries go with them (ON DELETE CASCADE).
+    """
+    with transaction() as conn:
+        removed = conn.execute(
+            "SELECT COUNT(*) FROM media WHERE folder_id = ?", (folder_id,)
+        ).fetchone()[0]
+        conn.execute("DELETE FROM media WHERE folder_id = ?", (folder_id,))
+        conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+        # Drop people left with no faces at all.
+        conn.execute(
+            "DELETE FROM people WHERE id NOT IN "
+            "(SELECT DISTINCT person_id FROM faces WHERE person_id IS NOT NULL)"
+        )
+    return removed
+
+
 def list_folders() -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
@@ -78,9 +98,11 @@ def _iter_media_files(root: Path):
 def _index_file(conn, folder_id: int, path: Path) -> bool:
     """Insert one media file. Returns True if newly added."""
     existing = conn.execute(
-        "SELECT id FROM media WHERE path = ?", (str(path),)
+        "SELECT id FROM media WHERE path = ? "
+        "UNION ALL SELECT 1 FROM excluded_paths WHERE path = ?",
+        (str(path), str(path)),
     ).fetchone()
-    if existing:
+    if existing:  # already indexed, or removed from the library by the user
         return False
 
     kind = "image" if path.suffix.lower() in IMAGE_EXTENSIONS else "video"
