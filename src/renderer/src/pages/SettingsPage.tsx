@@ -11,8 +11,26 @@ import {
   Divider,
   LinearProgress,
   Chip,
-  Alert
+  Alert,
+  Switch,
+  Tooltip,
+  IconButton,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+  Table,
+  TableBody,
+  TableCell,
+  TableRow
 } from '@mui/material'
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
+import TuneIcon from '@mui/icons-material/Tune'
+import { useNavigate } from 'react-router-dom'
+import { emitLibraryChanged } from '../api/client'
+import { refreshScanStatus } from '../hooks/useScanStatus'
+import { useNotify } from '../context/FeedbackContext'
 import FolderOpenIcon from '@mui/icons-material/FolderOpen'
 import RefreshIcon from '@mui/icons-material/Refresh'
 import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh'
@@ -22,13 +40,44 @@ import DeleteSweepIcon from '@mui/icons-material/DeleteSweep'
 import MemoryIcon from '@mui/icons-material/Memory'
 import { api } from '../api/client'
 import { useScanStatus } from '../hooks/useScanStatus'
-import type { Folder, SystemInfo } from '../api/types'
+import type { Folder, PrivacyInfo, SystemInfo } from '../api/types'
 
 export default function SettingsPage(): JSX.Element {
   const [folders, setFolders] = useState<Folder[]>([])
   const [error, setError] = useState<string | null>(null)
   const [tileCache, setTileCache] = useState<{ tiles: number; bytes: number } | null>(null)
   const status = useScanStatus()
+  const notify = useNotify()
+  const navigate = useNavigate()
+  const [privacy, setPrivacy] = useState<PrivacyInfo | null>(null)
+  const [removing, setRemoving] = useState<Folder | null>(null)
+
+  useEffect(() => {
+    api.privacy().then(setPrivacy).catch(() => setPrivacy(null))
+  }, [])
+
+  const toggleWatch = async (f: Folder, watch: boolean): Promise<void> => {
+    setFolders((fs) => fs.map((x) => (x.id === f.id ? { ...x, watch: watch ? 1 : 0 } : x)))
+    try {
+      await api.setFolderWatch(f.id, watch)
+      notify(watch ? 'New files in this folder will be imported automatically' : 'Auto-import off', {
+        severity: 'info'
+      })
+    } catch (e) {
+      notify(`Couldn't change auto-import: ${String(e)}`, { severity: 'error' })
+      loadFolders()
+    }
+  }
+
+  const confirmRemove = async (): Promise<void> => {
+    if (!removing) return
+    const f = removing
+    setRemoving(null)
+    const r = await api.removeFolder(f.id)
+    loadFolders()
+    emitLibraryChanged()
+    notify(`Removed ${f.path} · ${r.removed} item(s) left the library`, { severity: 'info' })
+  }
   const [system, setSystem] = useState<SystemInfo | null>(null)
 
   // Re-read after an AI run starts/stops: models load lazily, so the active
@@ -61,6 +110,8 @@ export default function SettingsPage(): JSX.Element {
       const paths = (await window.memora?.pickFolders()) ?? []
       for (const p of paths) await api.addFolder(p)
       loadFolders()
+      // Index straight away; the user shouldn't need a second click.
+      if (paths.length) await scan()
     } catch (e) {
       setError(String(e))
     }
@@ -68,9 +119,12 @@ export default function SettingsPage(): JSX.Element {
 
   const scan = async (): Promise<void> => {
     await api.scan()
+    refreshScanStatus()
   }
   const processAi = async (): Promise<void> => {
-    await api.processAi()
+    const r = await api.processAi()
+    if (!r.started) notify('Nothing new to process', { severity: 'info' })
+    refreshScanStatus()
   }
 
   const scanBusy = status?.scan.running
@@ -109,7 +163,37 @@ export default function SettingsPage(): JSX.Element {
         ) : (
           <List dense>
             {folders.map((f) => (
-              <ListItem key={f.id} disableGutters>
+              <ListItem
+                key={f.id}
+                disableGutters
+                secondaryAction={
+                  <Stack direction="row" alignItems="center" spacing={0.5}>
+                    <Tooltip title="Auto-import new files added to this folder">
+                      <Stack direction="row" alignItems="center">
+                        <Typography variant="caption" color="text.secondary">
+                          Auto-import
+                        </Typography>
+                        <Switch
+                          size="small"
+                          checked={!!f.watch}
+                          onChange={(e) => toggleWatch(f, e.target.checked)}
+                          inputProps={{ 'aria-label': `Auto-import new files in ${f.path}` }}
+                        />
+                      </Stack>
+                    </Tooltip>
+                    <Tooltip title="Remove from library">
+                      <IconButton
+                        edge="end"
+                        aria-label={`Remove ${f.path} from library`}
+                        onClick={() => setRemoving(f)}
+                      >
+                        <DeleteOutlineIcon />
+                      </IconButton>
+                    </Tooltip>
+                  </Stack>
+                }
+                sx={{ pr: 22 }}
+              >
                 <ListItemText
                   primary={f.path}
                   secondary={
@@ -145,6 +229,9 @@ export default function SettingsPage(): JSX.Element {
             disabled={aiBusy}
           >
             {aiBusy ? 'Processing…' : 'Run AI processing'}
+          </Button>
+          <Button startIcon={<TuneIcon />} onClick={() => navigate('/processing')}>
+            Details
           </Button>
         </Stack>
 
@@ -216,12 +303,60 @@ export default function SettingsPage(): JSX.Element {
           <Typography variant="h6">Privacy</Typography>
         </Stack>
         <Divider sx={{ mb: 1.5 }} />
-        <Typography variant="body2" color="text.secondary">
-          Memora is 100% offline. There is no cloud, no telemetry, and no tracking. All
-          metadata, thumbnails, and the SQLite database live under a{' '}
-          <code>.memora</code> folder in your home directory.
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          Memora is 100% offline. There is no cloud, no telemetry, and no tracking. Your
+          photos are never uploaded or modified.
         </Typography>
+        {privacy && (
+          <>
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1.5 }}>
+              <Chip size="small" color="success" variant="outlined" label="Uploads: never" />
+              <Chip size="small" variant="outlined" label={`AI: ${privacy.ai_backend}, on-device`} />
+              <Chip
+                size="small"
+                variant="outlined"
+                label={`Network requests this session: ${privacy.network.tile_requests} map tiles`}
+              />
+            </Stack>
+            <Table size="small" aria-label="Local storage used by Memora">
+              <TableBody>
+                {privacy.storage.map((row) => (
+                  <TableRow key={row.name}>
+                    <TableCell sx={{ pl: 0, whiteSpace: 'nowrap' }}>{row.name}</TableCell>
+                    <TableCell
+                      sx={{ color: 'text.secondary', wordBreak: 'break-all', fontSize: 12 }}
+                    >
+                      {row.path}
+                    </TableCell>
+                    <TableCell align="right" sx={{ pr: 0, whiteSpace: 'nowrap' }}>
+                      {fmtMB(row.bytes)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </>
+        )}
       </Paper>
+
+      <Dialog open={!!removing} onClose={() => setRemoving(null)}>
+        <DialogTitle>Remove this folder from the library?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {removing?.path}
+            <br />
+            <br />
+            Its photos, detected faces and album entries are removed from Memora. The files
+            on disk are not touched, and you can add the folder again later.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRemoving(null)}>Cancel</Button>
+          <Button color="error" variant="contained" onClick={confirmRemove}>
+            Remove
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   )
 }
