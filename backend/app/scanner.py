@@ -64,7 +64,7 @@ def add_folder(path: str) -> int:
 def list_folders() -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, path, added_at, last_scan FROM folders ORDER BY added_at"
+        "SELECT id, path, added_at, last_scan, watch FROM folders ORDER BY added_at"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -123,7 +123,7 @@ def _index_file(conn, folder_id: int, path: Path) -> bool:
     return True
 
 
-def _scan_worker(folder_ids: Optional[list[int]] = None) -> None:
+def _scan_worker(folder_ids: Optional[list[int]] = None, process_ai: bool = True) -> None:
     conn = get_conn()
     folders = list_folders()
     if folder_ids:
@@ -141,7 +141,9 @@ def _scan_worker(folder_ids: Optional[list[int]] = None) -> None:
         # Pass 1: count for progress.
         file_map: dict[int, list[Path]] = {}
         for folder in folders:
-            files = list(_iter_media_files(Path(folder["path"])))
+            root = Path(folder["path"])
+            # A folder on an unplugged drive is skipped, not a scan-killing error.
+            files = list(_iter_media_files(root)) if root.is_dir() else []
             file_map[folder["id"]] = files
             with STATUS._lock:
                 STATUS.total += len(files)
@@ -171,9 +173,15 @@ def _scan_worker(folder_ids: Optional[list[int]] = None) -> None:
             STATUS.running = False
             STATUS.current_folder = None
             STATUS.finished_at = datetime.now().isoformat()
+        if process_ai:
+            from . import ai_pipeline
+
+            # No-op when nothing is pending or a run is already going (the
+            # running worker re-checks for new items before it exits).
+            ai_pipeline.start_processing()
 
 
-def start_scan(folder_ids: Optional[list[int]] = None) -> bool:
+def start_scan(folder_ids: Optional[list[int]] = None, process_ai: bool = True) -> bool:
     """Kick off a scan in a background thread. Returns False if already running."""
     if not _scan_lock.acquire(blocking=False):
         return False
@@ -183,7 +191,7 @@ def start_scan(folder_ids: Optional[list[int]] = None) -> bool:
 
         def _run():
             try:
-                _scan_worker(folder_ids)
+                _scan_worker(folder_ids, process_ai)
             finally:
                 _scan_lock.release()
 

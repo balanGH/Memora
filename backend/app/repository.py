@@ -205,7 +205,40 @@ def merge_people(source_id: int, target_id: int) -> bool:
         conn.execute(
             "UPDATE faces SET person_id = ? WHERE person_id = ?", (target_id, source_id)
         )
+        # Re-point the source's relationships at the target instead of letting
+        # ON DELETE CASCADE silently drop them. Skip links that would become
+        # self-links or duplicate a link the target already has.
+        for rel in conn.execute(
+            "SELECT id, person_a, person_b, label, directed FROM relationships "
+            "WHERE person_a = ? OR person_b = ?",
+            (source_id, source_id),
+        ).fetchall():
+            a = target_id if rel["person_a"] == source_id else rel["person_a"]
+            b = target_id if rel["person_b"] == source_id else rel["person_b"]
+            if a == b:
+                continue
+            if not rel["directed"] and a > b:
+                a, b = b, a
+            dup = conn.execute(
+                "SELECT 1 FROM relationships WHERE (person_a = ? AND person_b = ?) "
+                "OR (person_a = ? AND person_b = ?)",
+                (a, b, b, a),
+            ).fetchone()
+            if not dup:
+                conn.execute(
+                    "UPDATE relationships SET person_a = ?, person_b = ? WHERE id = ?",
+                    (a, b, rel["id"]),
+                )
+        conn.execute(
+            """UPDATE people SET cover_media_id = (
+                   SELECT cover_media_id FROM people WHERE id = ?)
+               WHERE id = ? AND cover_media_id IS NULL""",
+            (source_id, target_id),
+        )
         conn.execute("DELETE FROM people WHERE id = ?", (source_id,))
+    from .ai_pipeline import invalidate_person_index
+
+    invalidate_person_index()
     return True
 
 
@@ -236,6 +269,13 @@ def split_person(person_id: int, media_ids: list[int]) -> Optional[int]:
                 WHERE id = ? AND cover_media_id IN ({placeholders})""",
             (person_id, *media_ids),
         )
+        conn.execute(
+            "UPDATE people SET cover_media_id = ? WHERE id = ?",
+            (media_ids[0], new_id),
+        )
+    from .ai_pipeline import invalidate_person_index
+
+    invalidate_person_index()
     return new_id
 
 
@@ -265,6 +305,7 @@ def search(query: str, limit: int = 200) -> dict:
         return {"query": query, "items": []}
 
     scores: dict[int, float] = {}
+    like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
     def bump(mid: int, amount: float):
         scores[mid] = scores.get(mid, 0.0) + amount
@@ -272,8 +313,8 @@ def search(query: str, limit: int = 200) -> dict:
     # 1. Tag matches (object / scene / pet / ocr)
     for row in conn.execute(
         """SELECT media_id, kind, label, confidence FROM tags
-           WHERE kind != 'embedding' AND LOWER(label) LIKE ?""",
-        (f"%{q}%",),
+           WHERE kind != 'embedding' AND LOWER(label) LIKE ? ESCAPE '\\'""",
+        (like,),
     ).fetchall():
         weight = 2.0 if row["kind"] in ("object", "pet") else 1.5
         bump(row["media_id"], weight * (row["confidence"] or 0.5))
@@ -281,8 +322,8 @@ def search(query: str, limit: int = 200) -> dict:
     # 2. Person-name matches
     for row in conn.execute(
         """SELECT f.media_id FROM faces f JOIN people p ON p.id = f.person_id
-           WHERE p.name IS NOT NULL AND LOWER(p.name) LIKE ?""",
-        (f"%{q}%",),
+           WHERE p.name IS NOT NULL AND LOWER(p.name) LIKE ? ESCAPE '\\'""",
+        (like,),
     ).fetchall():
         bump(row["media_id"], 3.0)
 
@@ -351,7 +392,9 @@ def similar_media(media_id: int, limit: int = 60) -> list[dict]:
             FROM media WHERE id IN ({placeholders}) AND is_trashed = 0""",
         top,
     ).fetchall()
-    return [_media_dict(r) for r in rows]
+    # SQL IN () returns rows in arbitrary order; restore most-similar-first.
+    by_id = {r["id"]: _media_dict(r) for r in rows}
+    return [by_id[mid] for mid in top if mid in by_id]
 
 
 # ---------------------------------------------------------------- Albums ----
@@ -582,12 +625,12 @@ def auto_connect(min_shared: int = 2, label: str = "appears with") -> int:
         for r in pairs:
             if (r["a"], r["b"]) in existing:
                 continue
-            tx.execute(
+            cur = tx.execute(
                 "INSERT OR IGNORE INTO relationships (person_a, person_b, label, directed) "
                 "VALUES (?, ?, ?, 0)",
                 (r["a"], r["b"], label),
             )
-            created += 1
+            created += cur.rowcount
     return created
 
 
@@ -726,6 +769,116 @@ def relation_suggestions(limit: int = 8) -> list[dict]:
         p["a_name"] = names.get(p["a"])
         p["b_name"] = names.get(p["b"])
     return picked
+
+
+# ----------------------------------------------------------- Processing ----
+
+def processing_stats() -> dict:
+    """Per-stage counts for the Processing Center."""
+    conn = get_conn()
+
+    def one(sql: str) -> int:
+        return conn.execute(sql).fetchone()[0]
+
+    total = one("SELECT COUNT(*) FROM media WHERE is_trashed = 0")
+    images = one("SELECT COUNT(*) FROM media WHERE kind = 'image' AND is_trashed = 0")
+    videos = one("SELECT COUNT(*) FROM media WHERE kind = 'video' AND is_trashed = 0")
+    dupes = one(
+        """SELECT COUNT(*) FROM media WHERE file_hash IN (
+               SELECT file_hash FROM media
+               WHERE file_hash IS NOT NULL GROUP BY file_hash HAVING COUNT(*) > 1
+           )"""
+    )
+    return {
+        "total": total,
+        "images": images,
+        "videos": videos,
+        "thumbnails": one("SELECT COUNT(*) FROM media WHERE thumb_path IS NOT NULL AND is_trashed = 0"),
+        "hashed": one("SELECT COUNT(*) FROM media WHERE file_hash IS NOT NULL AND is_trashed = 0"),
+        "faces_media": one("SELECT COUNT(DISTINCT media_id) FROM faces"),
+        "faces_total": one("SELECT COUNT(*) FROM faces"),
+        "ocr": one("SELECT COUNT(DISTINCT media_id) FROM tags WHERE kind = 'ocr'"),
+        "embeddings": one("SELECT COUNT(DISTINCT media_id) FROM tags WHERE kind = 'embedding'"),
+        "ai_processed": one("SELECT COUNT(*) FROM media WHERE ai_processed = 1"),
+        "failed": one("SELECT COUNT(*) FROM media WHERE ai_error IS NOT NULL"),
+        "duplicates": dupes,
+    }
+
+
+def failed_media(limit: int = 100) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, filename, ai_error FROM media WHERE ai_error IS NOT NULL LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ------------------------------------------------------------- Privacy ------
+
+def privacy_info() -> dict:
+    """Local-only status, network activity, and storage locations."""
+    from . import tiles
+    from .config import DATA_DIR, DB_PATH, DISPLAY_DIR, THUMBNAIL_DIR, TILES_DIR
+
+    def dir_bytes(p: Path) -> int:
+        total = 0
+        if p.exists():
+            for f in p.rglob("*"):
+                try:
+                    if f.is_file():
+                        total += f.stat().st_size
+                except OSError:
+                    pass
+        return total
+
+    from .ai import system_info
+
+    sysinfo = system_info()
+    real = sysinfo["active_backend"] == "insightface" or (
+        sysinfo["active_backend"] is None
+        and sysinfo["insightface_installed"]
+        and sysinfo["face_backend_setting"] != "stub"
+    )
+    device = "GPU" if sysinfo["is_gpu"] else "CPU"
+    tile_stats = tiles.cache_stats()
+
+    def file_bytes(p: Path) -> int:
+        try:
+            return p.stat().st_size if p.exists() else 0
+        except OSError:
+            return 0
+
+    return {
+        "local_ai": True,
+        "ai_backend": f"InsightFace (real, {device})" if real else "Stub (deterministic)",
+        "compute": sysinfo,
+        "uploads_enabled": False,
+        "cloud_services": [],
+        "network": {
+            "tile_requests": tiles.request_count(),
+            "tiles_cached": tile_stats["tiles"],
+            "tiles_bytes": tile_stats["bytes"],
+            "description": "Only outbound traffic is map-tile fetches on a cache miss.",
+        },
+        "storage": [
+            {"name": "Database", "path": str(DB_PATH), "bytes": file_bytes(DB_PATH)},
+            {"name": "Thumbnails", "path": str(THUMBNAIL_DIR), "bytes": dir_bytes(THUMBNAIL_DIR)},
+            {"name": "Display renditions", "path": str(DISPLAY_DIR), "bytes": dir_bytes(DISPLAY_DIR)},
+            {"name": "Map tiles", "path": str(TILES_DIR), "bytes": dir_bytes(TILES_DIR)},
+            {"name": "Data directory", "path": str(DATA_DIR), "bytes": dir_bytes(DATA_DIR)},
+        ],
+    }
+
+
+# ------------------------------------------------------- Folder watching ----
+
+def set_folder_watch(folder_id: int, watch: bool) -> bool:
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE folders SET watch = ? WHERE id = ?", (int(watch), folder_id)
+        )
+    return True
 
 
 # ---------------------------------------------------------------- Export ----

@@ -9,7 +9,7 @@ import hashlib
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, TypedDict
 
@@ -105,6 +105,10 @@ def extract_metadata(path: Path) -> MediaMeta:
         with Image.open(path) as img:
             meta["width"], meta["height"] = img.size
             exif = img.getexif()
+            # Orientations 5-8 are rotated 90/270 degrees: the displayed image
+            # (thumbnails use exif_transpose) is portrait, so swap to match.
+            if exif and exif.get(0x0112) in (5, 6, 7, 8):
+                meta["width"], meta["height"] = meta["height"], meta["width"]
             if exif:
                 tags = {TAGS.get(k, k): v for k, v in exif.items()}
                 meta["camera_make"] = _clean(tags.get("Make"))
@@ -130,10 +134,10 @@ def extract_metadata(path: Path) -> MediaMeta:
 
     if not meta.get("taken_at"):
         try:
+            # EXIF DateTimeOriginal is camera-local time, so use local time
+            # here too; mixing UTC in would shift mtime-dated files by hours.
             mtime = path.stat().st_mtime
-            meta["taken_at"] = datetime.fromtimestamp(
-                mtime, tz=timezone.utc
-            ).replace(tzinfo=None).isoformat()
+            meta["taken_at"] = datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
         except OSError:
             meta["taken_at"] = None
     return meta
@@ -149,6 +153,18 @@ def _clean(value) -> Optional[str]:
 def thumb_filename(path: Path) -> str:
     digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()
     return f"{digest}.webp"
+
+
+def file_sha1(path: Path) -> Optional[str]:
+    """sha1 of the file's bytes, for exact-duplicate detection. None on error."""
+    try:
+        h = hashlib.sha1()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
 
 
 def crop_face(
@@ -285,6 +301,9 @@ def extract_video_frames(path: Path, count: int = 8) -> list[Path]:
              "-frames:v", str(count), str(tmpdir / "f_%03d.jpg")],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120,
         )
-        return sorted(tmpdir.glob("f_*.jpg"))
+        frames = sorted(tmpdir.glob("f_*.jpg"))
     except Exception:
-        return []
+        frames = []
+    if not frames:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return frames
