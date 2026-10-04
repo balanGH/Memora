@@ -14,6 +14,9 @@ import RelationsPage from './pages/RelationsPage'
 import AlbumsPage from './pages/AlbumsPage'
 import AlbumPage from './pages/AlbumPage'
 import SettingsPage from './pages/SettingsPage'
+import ProcessingPage from './pages/ProcessingPage'
+import DuplicatesPage from './pages/DuplicatesPage'
+import { FeedbackProvider } from './context/FeedbackContext'
 
 const THEME_KEY = 'memora.theme'
 
@@ -48,6 +51,7 @@ export default function App(): JSX.Element {
     <ColorModeContext.Provider value={colorMode}>
       <ThemeProvider theme={theme}>
         <CssBaseline />
+        <FeedbackProvider>
         <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
           <Sidebar />
           <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -68,10 +72,13 @@ export default function App(): JSX.Element {
                 <Route path="/albums" element={<AlbumsPage />} />
                 <Route path="/albums/:id" element={<AlbumPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
+                <Route path="/processing" element={<ProcessingPage />} />
+                <Route path="/duplicates" element={<DuplicatesPage />} />
               </Routes>
             </Box>
           </Box>
         </Box>
+        </FeedbackProvider>
       </ThemeProvider>
     </ColorModeContext.Provider>
   )

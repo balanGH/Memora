@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import {
   Box,
@@ -9,7 +9,8 @@ import {
   ListItemText,
   Typography,
   Divider,
-  Chip
+  Chip,
+  CircularProgress
 } from '@mui/material'
 import PhotoLibraryIcon from '@mui/icons-material/PhotoLibrary'
 import PeopleIcon from '@mui/icons-material/People'
@@ -22,7 +23,10 @@ import ArchiveIcon from '@mui/icons-material/Archive'
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff'
 import DeleteIcon from '@mui/icons-material/Delete'
 import SettingsIcon from '@mui/icons-material/Settings'
-import { api } from '../api/client'
+import TuneIcon from '@mui/icons-material/Tune'
+import ContentCopyIcon from '@mui/icons-material/ContentCopy'
+import { api, LIBRARY_CHANGED } from '../api/client'
+import { useScanStatus } from '../hooks/useScanStatus'
 import type { LibraryStats } from '../api/types'
 
 const WIDTH = 236
@@ -50,10 +54,25 @@ const NAV: NavEntry[] = [
 export default function Sidebar(): JSX.Element {
   const [stats, setStats] = useState<LibraryStats | null>(null)
   const location = useLocation()
+  const status = useScanStatus()
+  const busy = !!(status?.scan.running || status?.ai.running)
+  const wasBusy = useRef(false)
 
-  useEffect(() => {
+  const refresh = (): void => {
     api.stats().then(setStats).catch(() => setStats(null))
-  }, [location.pathname])
+  }
+
+  // Refresh counts on navigation, after flag changes anywhere in the app,
+  // and whenever a scan or AI run finishes.
+  useEffect(refresh, [location.pathname])
+  useEffect(() => {
+    window.addEventListener(LIBRARY_CHANGED, refresh)
+    return () => window.removeEventListener(LIBRARY_CHANGED, refresh)
+  }, [])
+  useEffect(() => {
+    if (wasBusy.current && !busy) refresh()
+    wasBusy.current = busy
+  }, [busy])
 
   return (
     <Drawer
@@ -82,7 +101,7 @@ export default function Sidebar(): JSX.Element {
         </Typography>
       </Box>
       <Divider />
-      <List sx={{ px: 1, py: 1 }}>
+      <List sx={{ px: 1, py: 1 }} aria-label="Library">
         {NAV.map((item) => (
           <ListItemButton
             key={item.to}
@@ -109,7 +128,28 @@ export default function Sidebar(): JSX.Element {
       </List>
       <Box sx={{ flex: 1 }} />
       <Divider />
-      <List sx={{ px: 1, py: 1 }}>
+      <List sx={{ px: 1, py: 1 }} aria-label="Library tools">
+        <ListItemButton
+          component={NavLink}
+          to="/processing"
+          sx={{ borderRadius: 3, '&.active': { color: 'primary.main' } }}
+        >
+          <ListItemIcon sx={{ minWidth: 40 }}>
+            <TuneIcon />
+          </ListItemIcon>
+          <ListItemText primary="Processing" />
+          {busy && <CircularProgress size={16} aria-label="Processing in progress" />}
+        </ListItemButton>
+        <ListItemButton
+          component={NavLink}
+          to="/duplicates"
+          sx={{ borderRadius: 3, '&.active': { color: 'primary.main' } }}
+        >
+          <ListItemIcon sx={{ minWidth: 40 }}>
+            <ContentCopyIcon />
+          </ListItemIcon>
+          <ListItemText primary="Duplicates" />
+        </ListItemButton>
         <ListItemButton
           component={NavLink}
           to="/settings"

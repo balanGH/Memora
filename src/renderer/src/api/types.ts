@@ -52,13 +52,6 @@ export interface Album {
   created_at: string
 }
 
-export interface Folder {
-  id: number
-  path: string
-  added_at: string
-  last_scan: string | null
-}
-
 export interface LibraryStats {
   total: number
   favorites: number
@@ -76,7 +69,7 @@ export interface ScanState {
     added: number
     current_folder: string | null
   }
-  ai: { running: boolean; processed: number; total: number }
+  ai: AiStatus
 }
 
 export interface GpuInfo {
@@ -148,3 +141,86 @@ export interface FamilySuggestion {
 
 export type LibraryView = 'photos' | 'favorites' | 'archive' | 'hidden' | 'trash'
 export type SortKey = 'newest' | 'oldest' | 'favorites' | 'added'
+
+export interface Folder {
+  id: number
+  path: string
+  added_at: string
+  last_scan: string | null
+  watch?: number
+}
+
+export interface AiStatus {
+  running: boolean
+  processed: number
+  total: number
+  failed: number
+  paused: boolean
+  cancelling: boolean
+  current: string | null
+  finished_at: string | null
+}
+
+export interface ProcessingStages {
+  total: number
+  images: number
+  videos: number
+  thumbnails: number
+  hashed: number
+  faces_media: number
+  faces_total: number
+  ocr: number
+  embeddings: number
+  ai_processed: number
+  failed: number
+  duplicates: number
+}
+
+export interface ProcessingSnapshot {
+  scan: ScanState['scan']
+  ai: AiStatus
+  watch: { running: boolean; watched: number; added_total: number; last_check: string | null }
+  stages: ProcessingStages
+}
+
+export interface FailedMedia {
+  id: number
+  filename: string
+  ai_error: string
+}
+
+export interface PrivacyInfo {
+  local_ai: boolean
+  ai_backend: string
+  uploads_enabled: boolean
+  network: {
+    tile_requests: number
+    tiles_cached: number
+    tiles_bytes: number
+    description: string
+  }
+  storage: { name: string; path: string; bytes: number }[]
+}
+
+export interface DuplicateItem extends MediaItem {
+  path: string
+  size_bytes: number | null
+}
+
+export interface DuplicateGroup {
+  hash: string
+  items: DuplicateItem[]
+}
+
+export interface TimelineMonth {
+  month: string | null
+  count: number
+  offset: number
+}
+
+export interface SearchSuggestions {
+  people: { id: number; name: string; count: number }[]
+  tags: { label: string; count: number }[]
+}
+
+export type MediaFlag = 'is_favorite' | 'is_archived' | 'is_hidden' | 'is_trashed'

@@ -14,7 +14,14 @@ import type {
   RelationSuggestion,
   ScanState,
   SortKey,
-  SystemInfo
+  SystemInfo,
+  DuplicateGroup,
+  FailedMedia,
+  MediaFlag,
+  PrivacyInfo,
+  ProcessingSnapshot,
+  SearchSuggestions,
+  TimelineMonth
 } from './types'
 
 let baseUrl = 'http://127.0.0.1:8756'
@@ -79,6 +86,21 @@ export const api = {
       body: JSON.stringify({ folder_ids: folderIds ?? null })
     }),
   processAi: () => req<{ started: boolean }>('/api/ai/process', { method: 'POST' }),
+  removeFolder: (id: number) =>
+    req<{ removed: number }>(`/api/folders/${id}`, { method: 'DELETE' }),
+  setFolderWatch: (id: number, watch: boolean) =>
+    req<{ ok: boolean }>(`/api/folders/${id}/watch`, {
+      method: 'POST',
+      body: JSON.stringify({ watch })
+    }),
+
+  // processing center
+  processing: () => req<ProcessingSnapshot>('/api/processing'),
+  processingFailed: () => req<{ failed: FailedMedia[] }>('/api/processing/failed'),
+  processingAction: (action: 'start' | 'pause' | 'resume' | 'cancel' | 'retry') =>
+    req<{ ok?: boolean; retried?: number }>(`/api/processing/${action}`, { method: 'POST' }),
+  privacy: () => req<PrivacyInfo>('/api/privacy'),
+  duplicates: () => req<{ groups: DuplicateGroup[] }>('/api/duplicates'),
   scanStatus: () => req<ScanState>('/api/scan/status'),
 
   // media
@@ -93,6 +115,15 @@ export const api = {
       body: JSON.stringify({ flag, value })
     }),
   similar: (id: number) => req<{ items: MediaItem[] }>(`/api/media/${id}/similar`),
+  setFlags: (ids: number[], flag: MediaFlag, value: boolean) =>
+    req<{ changed: number }>('/api/media/flags', {
+      method: 'POST',
+      body: JSON.stringify({ media_ids: ids, flag, value })
+    }),
+  timeline: (view: LibraryView, sort: SortKey) =>
+    req<{ months: TimelineMonth[] }>(`/api/media/timeline?view=${view}&sort=${sort}`),
+  restoreTrash: () => req<{ restored: number }>('/api/trash/restore', { method: 'POST' }),
+  emptyTrash: () => req<{ removed: number }>('/api/trash/empty', { method: 'POST' }),
   addTag: (id: number, label: string) =>
     req<{ tag: { id: number; kind: string; label: string; confidence: number } }>(
       `/api/media/${id}/tags`,
@@ -132,8 +163,12 @@ export const api = {
     }),
 
   // search
-  search: (q: string) =>
-    req<{ query: string; items: MediaItem[] }>(`/api/search?q=${encodeURIComponent(q)}`),
+  search: (q: string, personId?: number) =>
+    req<{ query: string; items: MediaItem[] }>(
+      `/api/search?q=${encodeURIComponent(q)}${personId ? `&person_id=${personId}` : ''}`
+    ),
+  suggest: (q: string) =>
+    req<SearchSuggestions>(`/api/search/suggest?q=${encodeURIComponent(q)}`),
 
   // places
   places: () => req<{ places: Place[] }>('/api/places'),
@@ -192,4 +227,10 @@ export const api = {
     }),
   albumMedia: (albumId: number) =>
     req<{ items: MediaItem[] }>(`/api/albums/${albumId}/media`)
+}
+
+/** Fired after anything that changes library counts (flags, trash, scans). */
+export const LIBRARY_CHANGED = 'memora:library-changed'
+export function emitLibraryChanged(): void {
+  window.dispatchEvent(new Event(LIBRARY_CHANGED))
 }
