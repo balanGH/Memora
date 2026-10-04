@@ -23,17 +23,27 @@ class RealFaceService:
         # Imports are deferred to construction so the module is importable even
         # when the packages are missing (we only build this when enabled).
         from insightface.app import FaceAnalysis  # type: ignore
-        import onnxruntime as ort  # type: ignore
 
-        available = ort.get_available_providers()
-        # Prefer GPU if the CUDA provider is present; always keep CPU fallback.
-        providers = (
-            ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            if "CUDAExecutionProvider" in available
-            else ["CPUExecutionProvider"]
-        )
-        self._app = FaceAnalysis(name=model_name, providers=providers)
-        self._app.prepare(ctx_id=0, det_size=(det_size, det_size))
+        from .device import detect_device
+
+        info = detect_device()
+        self.device = info
+        self._app = FaceAnalysis(name=model_name, providers=info.providers)
+        # ctx_id >= 0 keeps the GPU provider; -1 makes InsightFace pin to CPU.
+        self._app.prepare(ctx_id=0 if info.is_gpu else -1, det_size=(det_size, det_size))
+        # onnxruntime silently falls back to CPU when a GPU provider fails to
+        # initialise (missing CUDA/cuDNN, old driver). Report what really runs.
+        self.active_providers = self._session_providers() or info.providers
+
+    def _session_providers(self) -> list[str]:
+        for model in getattr(self._app, "models", {}).values():
+            session = getattr(model, "session", None)
+            if session is not None:
+                try:
+                    return list(session.get_providers())
+                except Exception:
+                    return []
+        return []
 
     def _read_bgr(self, image_path: Path):
         import cv2  # type: ignore

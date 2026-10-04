@@ -74,6 +74,10 @@ class AIServices:
     # Cosine-similarity threshold above which two faces are the same person.
     # Depends on the embedding space: stub uses ~0.92, InsightFace ~0.45.
     face_match_threshold: float = 0.92
+    # Human-readable name of the face backend ('stub' | 'insightface').
+    backend: str = "stub"
+    # Execution providers actually in use, e.g. ['DmlExecutionProvider', 'CPUExecutionProvider'].
+    providers: list[str] = field(default_factory=lambda: ["CPUExecutionProvider"])
 
     def analyze(self, image_path: Path) -> AIResult:
         return AIResult(
