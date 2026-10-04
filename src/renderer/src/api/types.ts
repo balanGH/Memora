@@ -79,6 +79,28 @@ export interface ScanState {
   ai: { running: boolean; processed: number; total: number }
 }
 
+export interface GpuInfo {
+  name: string
+  vendor: 'nvidia' | 'amd' | 'intel' | 'apple' | 'other'
+  memory_mb: number | null
+  driver: string | null
+}
+
+/** Hardware + AI backend status from GET /api/system. */
+export interface SystemInfo {
+  device: 'cuda' | 'directml' | 'coreml' | 'cpu'
+  is_gpu: boolean
+  providers: string[]
+  gpus: GpuInfo[]
+  onnxruntime: string | null
+  recommended_package: string | null
+  reason: string
+  insightface_installed: boolean
+  active_backend: 'stub' | 'insightface' | null
+  active_providers: string[]
+  gpu_in_use: boolean
+}
+
 export interface Place {
   key: string
   lat: number
