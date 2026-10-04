@@ -371,6 +371,8 @@ const PhotoGrid = forwardRef<PhotoGridHandle, Props>(function PhotoGrid(
           endReached={onEndReached}
           increaseViewportBy={{ top: 600, bottom: 900 }}
           groupContent={(g) => {
+            // Ungrouped lists (e.g. search by relevance) get a thin spacer.
+            if (!labels[g]) return <Box sx={{ height: 12, bgcolor: 'background.default' }} />
             const [a, b] = groupRanges[g] ?? [0, 0]
             const allSelected =
               selectionActive && items.slice(a, b).every((i) => selected.has(i.id))

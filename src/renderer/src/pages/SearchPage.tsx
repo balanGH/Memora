@@ -44,6 +44,7 @@ export default function SearchPage(): JSX.Element {
   const [favOnly, setFavOnly] = useState(false)
   const [fromYear, setFromYear] = useState<number | ''>('')
   const [toYear, setToYear] = useState<number | ''>('')
+  const [order, setOrder] = useState<'relevance' | 'date'>('relevance')
 
   const run = useCallback(async () => {
     if (!q.trim()) {
@@ -89,6 +90,15 @@ export default function SearchPage(): JSX.Element {
       }),
     [items, kind, favOnly, fromYear, toYear]
   )
+  // Relevance keeps the backend's ranking in one block; date sorts newest first
+  // and groups by month (grouping a relevance-ranked list repeats dates).
+  const ordered = useMemo(
+    () =>
+      order === 'relevance'
+        ? shown
+        : [...shown].sort((a, b) => (b.taken_at ?? '').localeCompare(a.taken_at ?? '')),
+    [shown, order]
+  )
 
   const filtersOn = kind !== 'all' || favOnly || fromYear !== '' || toYear !== '' || !!personId
   const clearFilters = (): void => {
@@ -118,7 +128,7 @@ export default function SearchPage(): JSX.Element {
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       {selected.size > 0 ? (
         <SelectionBar
-          items={shown}
+          items={ordered}
           selected={selected}
           onChange={setSelected}
           view="search"
@@ -209,6 +219,16 @@ export default function SearchPage(): JSX.Element {
                   </MenuItem>
                 ))}
               </TextField>
+              <ToggleButtonGroup
+                size="small"
+                exclusive
+                value={order}
+                onChange={(_, v) => v && setOrder(v)}
+                aria-label="Order results"
+              >
+                <ToggleButton value="relevance">Best match</ToggleButton>
+                <ToggleButton value="date">Newest</ToggleButton>
+              </ToggleButtonGroup>
               <FormControlLabel
                 control={<Switch size="small" checked={favOnly} onChange={(e) => setFavOnly(e.target.checked)} />}
                 label="Favorites only"
@@ -232,8 +252,8 @@ export default function SearchPage(): JSX.Element {
       )}
       <Box sx={{ flex: 1, minHeight: 0 }}>
         <PhotoGrid
-          items={shown}
-          grouping="year"
+          items={ordered}
+          grouping={order === 'relevance' ? 'none' : 'month'}
           onOpen={setViewerIndex}
           loading={loading}
           selected={selected}
@@ -258,7 +278,7 @@ export default function SearchPage(): JSX.Element {
       </Box>
       {viewerIndex !== null && (
         <PhotoViewer
-          items={shown}
+          items={ordered}
           index={viewerIndex}
           onClose={() => setViewerIndex(null)}
           onIndexChange={setViewerIndex}

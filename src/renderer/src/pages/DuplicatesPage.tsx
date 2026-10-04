@@ -16,6 +16,12 @@ import { api, thumbUrl } from '../api/client'
 import type { DuplicateGroup } from '../api/types'
 import { useMediaActions } from '../hooks/useMediaActions'
 
+/** Last two path segments, e.g. "backup\IMG_1.jpg" — the part that differs. */
+function pathTail(p: string): string {
+  const parts = p.split(/[\\/]/).filter(Boolean)
+  return parts.slice(-2).join('/')
+}
+
 function fmtSize(bytes: number | null): string {
   if (!bytes) return '—'
   return bytes > 1024 * 1024
@@ -172,7 +178,7 @@ export default function DuplicatesPage(): JSX.Element {
                           )}
                           <Typography variant="caption" noWrap component="div" sx={{ mt: 0.5 }}>
                             {kept ? 'Keep · ' : ''}
-                            {item.path}
+                            {pathTail(item.path)}
                           </Typography>
                         </Box>
                       </Tooltip>

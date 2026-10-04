@@ -62,6 +62,7 @@ export default function LibraryPage({ view }: { view: LibraryView }): JSX.Elemen
   const total = useRef(0)
   const inflight = useRef<Promise<void> | null>(null)
   const pendingScroll = useRef<number | null>(null)
+  const viewKey = useRef('')
   const grid = useRef<PhotoGridHandle>(null)
   const scan = useScanStatus()
   const wasBusy = useRef(false)
@@ -79,10 +80,18 @@ export default function LibraryPage({ view }: { view: LibraryView }): JSX.Elemen
           total.current = page.total
           offset.current = nextOffset + page.items.length
           setItems((prev) => (reset ? page.items : [...prev, ...page.items]))
-        } finally {
-          inflight.current = null
           setLoading(false)
+        } catch {
+          // Backend still starting (first launch) or briefly unavailable:
+          // keep the skeleton up and try again shortly.
+          const key = `${view}|${sort}`
+          setTimeout(() => {
+            inflight.current = null
+            if (viewKey.current === key) load(reset)
+          }, 1500)
+          return
         }
+        inflight.current = null
       })()
       inflight.current = p
       return p
@@ -105,6 +114,7 @@ export default function LibraryPage({ view }: { view: LibraryView }): JSX.Elemen
   }, [view, sort, timelineSort])
 
   useEffect(() => {
+    viewKey.current = `${view}|${sort}`
     offset.current = 0
     total.current = 0
     setItems([])

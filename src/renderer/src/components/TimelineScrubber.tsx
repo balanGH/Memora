@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Box, ButtonBase, Typography } from '@mui/material'
 import type { TimelineMonth } from '../api/types'
 
@@ -23,18 +23,23 @@ const MIN_LABEL_GAP = 18 // px between year labels before we drop one
  * click jumps there. Year labels are buttons, so it works from the keyboard.
  */
 export default function TimelineScrubber({ months, onJump }: Props): JSX.Element | null {
-  const railRef = useRef<HTMLDivElement>(null)
+  const observer = useRef<ResizeObserver | null>(null)
   const [height, setHeight] = useState(0)
   const [hover, setHover] = useState<{ y: number; month: TimelineMonth } | null>(null)
   const total = months.reduce((n, m) => n + m.count, 0)
 
-  useLayoutEffect(() => {
-    const el = railRef.current
+  // Callback ref: the rail mounts only once months arrive, so a mount-time
+  // effect would miss it and leave height at 0 (every year label collapsed).
+  const railRef = useCallback((el: HTMLDivElement | null) => {
+    observer.current?.disconnect()
+    observer.current = null
     if (!el) return
+    setHeight(el.getBoundingClientRect().height)
     const ro = new ResizeObserver((e) => setHeight(e[0].contentRect.height))
     ro.observe(el)
-    return () => ro.disconnect()
+    observer.current = ro
   }, [])
+  useEffect(() => () => observer.current?.disconnect(), [])
 
   // First month of each year, with its vertical position.
   const years = useMemo(() => {
