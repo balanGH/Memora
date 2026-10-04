@@ -1,6 +1,6 @@
 import type { MediaItem } from '../api/types'
 
-export type Grouping = 'day' | 'month' | 'year'
+export type Grouping = 'day' | 'month' | 'year' | 'none'
 
 function parse(taken: string | null): Date | null {
   if (!taken) return null
@@ -9,6 +9,7 @@ function parse(taken: string | null): Date | null {
 }
 
 export function groupLabel(taken: string | null, grouping: Grouping): string {
+  if (grouping === 'none') return ''
   const d = parse(taken)
   if (!d) return 'Unknown date'
   if (grouping === 'year') return String(d.getFullYear())
