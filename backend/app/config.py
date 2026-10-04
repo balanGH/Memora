@@ -24,8 +24,9 @@ HOST = os.environ.get("MEMORA_HOST", "127.0.0.1")
 PORT = int(os.environ.get("MEMORA_PORT", "8756"))
 
 # Media handling
+# Lower-case only: callers compare against ``path.suffix.lower()``.
 IMAGE_EXTENSIONS = {
-    ".jpg", ".JPG", "jpeg", ".png", ".gif", ".bmp", ".webp",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
     ".tif", ".tiff", ".heic", ".heif",
 }
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}

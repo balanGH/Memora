@@ -25,6 +25,14 @@ from .config import TILES_DIR
 _USER_AGENT = "Memora/0.1 (local desktop photo manager; https://memora.local)"
 _TIMEOUT = 10
 
+# Count of outbound tile fetches (cache misses) this session — surfaced in the
+# Privacy dashboard so the user can see the app's only network activity.
+_request_count = 0
+
+
+def request_count() -> int:
+    return _request_count
+
 # Style -> upstream URL template. CARTO serves subdomains a-d; we use one
 # server-side (no browser subdomain sharding needed). {z}/{x}/{y} are filled in.
 _PROVIDERS = {
@@ -71,6 +79,8 @@ def get_tile(style: str, z: int, x: int, y: int) -> Optional[bytes]:
         _upstream(style, z, x, y),
         headers={"User-Agent": _USER_AGENT, "Referer": "https://memora.local/"},
     )
+    global _request_count
+    _request_count += 1
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
             data = resp.read()

@@ -6,6 +6,8 @@ scanning + AI processing. Bound to localhost only; nothing is ever uploaded.
 from __future__ import annotations
 
 import mimetypes
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Response
@@ -13,12 +15,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from . import ai_pipeline, repository, scanner, tiles
+from . import ai_pipeline, repository, scanner, tiles, watcher
+from .ai import system_info
+from .ai.device import describe, detect_device
 from .config import HOST, PORT
 from .db import get_conn, init_db
 from .media_utils import crop_face, generate_display, is_web_safe
 
-app = FastAPI(title="Memora", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    init_db()
+    watcher.start_watcher()
+    # Probe the hardware off the request path (spawns OS queries) so the first
+    # /api/system call is instant and the choice shows up in the log at boot.
+    threading.Thread(
+        target=lambda: print(f"[memora] hardware: {describe(detect_device())}"),
+        daemon=True,
+        name="memora-hwprobe",
+    ).start()
+    yield
+
+
+app = FastAPI(title="Memora", version="0.1.0", lifespan=_lifespan)
 
 # Media bytes are addressed by numeric media id (/api/thumb/{id}, /api/display/{id}).
 # Because ids are reused when the library is rescanned/rebuilt, the same URL can
@@ -37,14 +55,15 @@ app.add_middleware(
 )
 
 
-@app.on_event("startup")
-def _startup() -> None:
-    init_db()
-
-
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "version": app.version}
+
+
+@app.get("/api/system")
+def get_system() -> dict:
+    """Detected GPUs, chosen compute device, and the active AI backend."""
+    return system_info()
 
 
 @app.get("/api/stats")
@@ -72,6 +91,16 @@ def post_folder(body: FolderIn) -> dict:
     return {"id": folder_id}
 
 
+class WatchIn(BaseModel):
+    watch: bool
+
+
+@app.post("/api/folders/{folder_id}/watch")
+def post_folder_watch(folder_id: int, body: WatchIn) -> dict:
+    repository.set_folder_watch(folder_id, body.watch)
+    return {"ok": True}
+
+
 # -------------------------------------------------------------- Scan --------
 
 class ScanIn(BaseModel):
@@ -81,7 +110,7 @@ class ScanIn(BaseModel):
 
 @app.post("/api/scan")
 def post_scan(body: ScanIn) -> dict:
-    started = scanner.start_scan(body.folder_ids)
+    started = scanner.start_scan(body.folder_ids, body.process_ai)
     return {"started": started}
 
 
@@ -96,6 +125,46 @@ def scan_status() -> dict:
 @app.post("/api/ai/process")
 def post_process() -> dict:
     return {"started": ai_pipeline.start_processing()}
+
+
+# -------------------------------------------------- Processing Center -------
+
+@app.get("/api/processing")
+def get_processing() -> dict:
+    """Full snapshot for the Processing Center: live status + per-stage counts."""
+    return {
+        "scan": scanner.STATUS.snapshot(),
+        "ai": ai_pipeline.STATUS,
+        "watch": watcher.snapshot(),
+        "stages": repository.processing_stats(),
+    }
+
+
+@app.get("/api/processing/failed")
+def get_processing_failed() -> dict:
+    return {"failed": repository.failed_media()}
+
+
+@app.post("/api/processing/{action}")
+def post_processing_action(action: str) -> dict:
+    if action == "start":
+        return {"ok": ai_pipeline.start_processing()}
+    if action == "pause":
+        return {"ok": ai_pipeline.pause_processing()}
+    if action == "resume":
+        return {"ok": ai_pipeline.resume_processing()}
+    if action == "cancel":
+        return {"ok": ai_pipeline.cancel_processing()}
+    if action == "retry":
+        return {"retried": ai_pipeline.retry_failed()}
+    raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
+
+
+# ------------------------------------------------------------- Privacy ------
+
+@app.get("/api/privacy")
+def get_privacy() -> dict:
+    return repository.privacy_info()
 
 
 # -------------------------------------------------------------- Media -------
@@ -461,7 +530,6 @@ def get_album_media(album_id: int) -> dict:
 def run() -> None:
     import uvicorn
 
-    init_db()
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
 
 

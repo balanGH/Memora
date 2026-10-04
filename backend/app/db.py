@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS folders (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     path        TEXT NOT NULL UNIQUE,
     added_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    last_scan   TEXT
+    last_scan   TEXT,
+    watch       INTEGER NOT NULL DEFAULT 0   -- auto-ingest new files in this folder
 );
 
 CREATE TABLE IF NOT EXISTS media (
@@ -63,8 +64,10 @@ CREATE TABLE IF NOT EXISTS media (
     is_hidden       INTEGER NOT NULL DEFAULT 0,
     is_trashed      INTEGER NOT NULL DEFAULT 0,
     trashed_at      TEXT,
-    -- AI processing flag
-    ai_processed    INTEGER NOT NULL DEFAULT 0
+    -- AI processing
+    ai_processed    INTEGER NOT NULL DEFAULT 0,
+    ai_error        TEXT,                       -- last processing error (failed jobs)
+    file_hash       TEXT                        -- sha1 of file bytes (exact-dup detection)
 );
 
 CREATE INDEX IF NOT EXISTS idx_media_taken_at ON media(taken_at DESC);
@@ -220,4 +223,8 @@ def init_db() -> None:
     # Age/gender columns for family (parent/child) suggestions (real backend).
     _ensure_column(conn, "faces", "age", "REAL")
     _ensure_column(conn, "faces", "gender", "TEXT")
+    # Processing Center + Watch Folders + duplicate detection columns.
+    _ensure_column(conn, "media", "ai_error", "TEXT")
+    _ensure_column(conn, "media", "file_hash", "TEXT")
+    _ensure_column(conn, "folders", "watch", "INTEGER NOT NULL DEFAULT 0")
     _migrate_stable_ids(conn)
