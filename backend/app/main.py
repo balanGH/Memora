@@ -91,6 +91,12 @@ def post_folder(body: FolderIn) -> dict:
     return {"id": folder_id}
 
 
+@app.delete("/api/folders/{folder_id}")
+def delete_folder(folder_id: int) -> dict:
+    """Remove a folder from the library (files on disk are untouched)."""
+    return {"removed": scanner.remove_folder(folder_id)}
+
+
 class WatchIn(BaseModel):
     watch: bool
 
@@ -174,6 +180,41 @@ def get_media_list(
     view: str = "photos", sort: str = "newest", limit: int = 200, offset: int = 0
 ) -> dict:
     return repository.list_media(view=view, sort=sort, limit=limit, offset=offset)
+
+
+@app.get("/api/media/timeline")
+def get_media_timeline(view: str = "photos", sort: str = "newest") -> dict:
+    return {"months": repository.timeline(view=view, sort=sort)}
+
+
+class BulkFlagIn(BaseModel):
+    media_ids: list[int]
+    flag: str
+    value: bool
+
+
+@app.post("/api/media/flags")
+def post_bulk_flag(body: BulkFlagIn) -> dict:
+    try:
+        return {"changed": repository.set_flag_bulk(body.media_ids, body.flag, body.value)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/trash/restore")
+def post_trash_restore() -> dict:
+    return {"restored": repository.restore_all_trash()}
+
+
+@app.post("/api/trash/empty")
+def post_trash_empty() -> dict:
+    """Remove trashed items from the library. Original files stay on disk."""
+    return {"removed": repository.empty_trash()}
+
+
+@app.get("/api/duplicates")
+def get_duplicates() -> dict:
+    return {"groups": repository.duplicate_groups()}
 
 
 @app.get("/api/media/{media_id}")
@@ -451,8 +492,13 @@ def delete_relation(rel_id: int) -> dict:
 # ------------------------------------------------------------- Search -------
 
 @app.get("/api/search")
-def get_search(q: str, limit: int = 200) -> dict:
-    return repository.search(q, limit=limit)
+def get_search(q: str, limit: int = 200, person_id: int | None = None) -> dict:
+    return repository.search(q, limit=limit, person_id=person_id)
+
+
+@app.get("/api/search/suggest")
+def get_search_suggest(q: str) -> dict:
+    return repository.search_suggestions(q)
 
 
 # ------------------------------------------------------------- Places -------
