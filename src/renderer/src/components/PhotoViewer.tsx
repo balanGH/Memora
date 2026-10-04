@@ -11,18 +11,17 @@ import {
   Stack,
   Avatar,
   TextField,
-  Menu,
-  MenuItem,
-  Snackbar,
-  Alert,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Button
+  Button,
+  CircularProgress
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
 import LibraryAddIcon from '@mui/icons-material/LibraryAdd'
+import UnarchiveIcon from '@mui/icons-material/Unarchive'
+import VisibilityOffIcon from '@mui/icons-material/VisibilityOff'
+import VisibilityIcon from '@mui/icons-material/Visibility'
+import RestoreFromTrashIcon from '@mui/icons-material/RestoreFromTrash'
+import AutoAwesomeMosaicIcon from '@mui/icons-material/AutoAwesomeMosaic'
+import ArrowBackIcon from '@mui/icons-material/ArrowBack'
 import { useNavigate } from 'react-router-dom'
 import CloseIcon from '@mui/icons-material/Close'
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft'
@@ -36,7 +35,15 @@ import ZoomInIcon from '@mui/icons-material/ZoomIn'
 import ZoomOutIcon from '@mui/icons-material/ZoomOut'
 import PlaceIcon from '@mui/icons-material/Place'
 import { api, displayUrl, fileUrl, personFaceUrl, thumbUrl } from '../api/client'
-import type { MediaItem, MediaDetail, Album } from '../api/types'
+import type { LibraryView, MediaFlag, MediaItem, MediaDetail } from '../api/types'
+import { useMediaActions } from '../hooks/useMediaActions'
+import AlbumPickerMenu from './AlbumPickerMenu'
+
+/** True when a keystroke is meant for a text field, not a viewer shortcut. */
+function isTyping(e: KeyboardEvent): boolean {
+  const t = e.target as HTMLElement | null
+  return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)
+}
 
 interface Props {
   items: MediaItem[]
@@ -44,6 +51,8 @@ interface Props {
   onClose: () => void
   onIndexChange: (i: number) => void
   onMutate?: () => void
+  /** Library bucket being browsed; flips archive / hide / trash into undo actions. */
+  view?: LibraryView
 }
 
 export default function PhotoViewer({
@@ -51,18 +60,20 @@ export default function PhotoViewer({
   index,
   onClose,
   onIndexChange,
-  onMutate
+  onMutate,
+  view
 }: Props): JSX.Element {
-  const item = items[index]
+  // A photo opened from the Similar strip temporarily replaces the current one.
+  const [override, setOverride] = useState<MediaItem | null>(null)
+  const item = override ?? items[index]
   const navigate = useNavigate()
   const [detail, setDetail] = useState<MediaDetail | null>(null)
   const [showInfo, setShowInfo] = useState(false)
   const [tagInput, setTagInput] = useState('')
   const [albumAnchor, setAlbumAnchor] = useState<null | HTMLElement>(null)
-  const [albums, setAlbums] = useState<Album[]>([])
-  const [newAlbumOpen, setNewAlbumOpen] = useState(false)
-  const [newAlbumName, setNewAlbumName] = useState('')
-  const [toast, setToast] = useState<string | null>(null)
+  const [showSimilar, setShowSimilar] = useState(false)
+  const [similar, setSimilar] = useState<MediaItem[] | null>(null)
+  const { setFlag } = useMediaActions(onMutate)
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const dragging = useRef<{ x: number; y: number } | null>(null)
@@ -105,34 +116,21 @@ export default function PhotoViewer({
     [item]
   )
 
-  // --- add the current photo to an album -----------------------------------
-  const openAlbumMenu = useCallback((e: React.MouseEvent<HTMLElement>) => {
-    setAlbumAnchor(e.currentTarget)
-    api.albums().then((r) => setAlbums(r.albums))
-  }, [])
+  // Keep the index valid when the list shrinks (e.g. after trashing a photo the
+  // next one slides into place); close when nothing is left.
+  useEffect(() => {
+    if (override) return
+    if (items.length === 0) onClose()
+    else if (index >= items.length) onIndexChange(items.length - 1)
+  }, [items.length, index, override, onClose, onIndexChange])
 
-  const addToAlbum = useCallback(
-    async (album: Album) => {
-      if (!item) return
-      setAlbumAnchor(null)
-      const r = await api.addToAlbum(album.id, [item.id])
-      setToast(
-        r.added > 0 ? `Added to “${album.name}”` : `Already in “${album.name}”`
-      )
-    },
-    [item]
-  )
-
-  const createAndAdd = useCallback(async () => {
-    const name = newAlbumName.trim()
-    if (!name || !item) return
-    const { id } = await api.createAlbum(name)
-    await api.addToAlbum(id, [item.id])
-    setNewAlbumName('')
-    setNewAlbumOpen(false)
-    setAlbumAnchor(null)
-    setToast(`Added to new album “${name}”`)
-  }, [newAlbumName, item])
+  // Similar photos are fetched lazily when the strip is open.
+  useEffect(() => {
+    setSimilar(null)
+    if (showSimilar && item) {
+      api.similar(item.id).then((r) => setSimilar(r.items)).catch(() => setSimilar([]))
+    }
+  }, [showSimilar, item?.id])
 
   useEffect(() => {
     reset()
@@ -141,33 +139,52 @@ export default function PhotoViewer({
   }, [item?.id, reset])
 
   const prev = useCallback(() => {
+    if (override) return setOverride(null)
     if (index > 0) onIndexChange(index - 1)
-  }, [index, onIndexChange])
+  }, [index, onIndexChange, override])
   const next = useCallback(() => {
+    if (override) return setOverride(null)
     if (index < items.length - 1) onIndexChange(index + 1)
-  }, [index, items.length, onIndexChange])
+  }, [index, items.length, onIndexChange, override])
 
   const toggleFlag = useCallback(
-    async (flag: 'is_favorite' | 'is_archived' | 'is_trashed') => {
+    async (flag: MediaFlag) => {
       if (!item) return
       const current =
         flag === 'is_favorite'
           ? item.is_favorite
           : flag === 'is_archived'
-            ? item.is_archived
-            : false
-      await api.setFlag(item.id, flag, !current)
-      onMutate?.()
-      if (flag === 'is_trashed') onClose()
+            ? (item.is_archived ?? view === 'archive')
+            : flag === 'is_hidden'
+              ? (item.is_hidden ?? view === 'hidden')
+              : view === 'trash'
+      await setFlag([item.id], flag, !current)
+      if (flag === 'is_favorite') {
+        setDetail((d) => (d ? { ...d, is_favorite: !current } : d))
+        if (override) setOverride({ ...override, is_favorite: !current })
+      } else if (override) {
+        setOverride(null)
+      }
     },
-    [item, onMutate, onClose]
+    [item, view, setFlag, override]
   )
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey) return
       switch (e.key) {
         case 'Escape':
-          onClose()
+          if (override) setOverride(null)
+          else onClose()
+          break
+        case 'Delete':
+          toggleFlag('is_trashed')
+          break
+        case 'e':
+          toggleFlag('is_archived')
+          break
+        case 's':
+          setShowSimilar((v) => !v)
           break
         case 'ArrowLeft':
           prev()
@@ -195,7 +212,7 @@ export default function PhotoViewer({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [prev, next, onClose, toggleFlag, reset])
+  }, [prev, next, onClose, toggleFlag, reset, override])
 
   if (!item) return <></>
 
@@ -217,47 +234,72 @@ export default function PhotoViewer({
       >
         {/* top bar */}
         <Box sx={{ display: 'flex', alignItems: 'center', p: 1.5, gap: 1, color: '#fff' }}>
-          <IconButton onClick={onClose} sx={{ color: '#fff' }}>
-            <CloseIcon />
-          </IconButton>
+          {override ? (
+            <Tooltip title="Back (Esc)">
+              <IconButton onClick={() => setOverride(null)} sx={{ color: '#fff' }} aria-label="Back to previous photo">
+                <ArrowBackIcon />
+              </IconButton>
+            </Tooltip>
+          ) : (
+            <IconButton onClick={onClose} sx={{ color: '#fff' }} aria-label="Close viewer">
+              <CloseIcon />
+            </IconButton>
+          )}
           <Typography sx={{ opacity: 0.8, flex: 1 }} noWrap>
-            {item.filename}
+            {override ? `Similar · ${item.filename}` : item.filename}
           </Typography>
-          <Tooltip title="Favorite (f)">
-            <IconButton onClick={() => toggleFlag('is_favorite')} sx={{ color: '#fff' }}>
-              {item.is_favorite ? <FavoriteIcon color="error" /> : <FavoriteBorderIcon />}
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Add to album">
-            <IconButton onClick={openAlbumMenu} sx={{ color: '#fff' }}>
-              <LibraryAddIcon />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Archive">
-            <IconButton onClick={() => toggleFlag('is_archived')} sx={{ color: '#fff' }}>
-              <ArchiveIcon />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Move to trash">
-            <IconButton onClick={() => toggleFlag('is_trashed')} sx={{ color: '#fff' }}>
-              <DeleteIcon />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Zoom out (-)">
-            <IconButton onClick={() => setZoom((z) => Math.max(z - 0.25, 1))} sx={{ color: '#fff' }}>
-              <ZoomOutIcon />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Zoom in (+)">
-            <IconButton onClick={() => setZoom((z) => Math.min(z + 0.25, 5))} sx={{ color: '#fff' }}>
-              <ZoomInIcon />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Info (i)">
-            <IconButton onClick={() => setShowInfo((s) => !s)} sx={{ color: '#fff' }}>
-              <InfoOutlinedIcon />
-            </IconButton>
-          </Tooltip>
+          {view === 'trash' && !override ? (
+            <Button
+              startIcon={<RestoreFromTrashIcon />}
+              variant="contained"
+              onClick={() => toggleFlag('is_trashed')}
+            >
+              Restore
+            </Button>
+          ) : (
+            <>
+              <ViewerButton
+                title={item.is_favorite ? 'Remove from favorites (f)' : 'Add to favorites (f)'}
+                onClick={() => toggleFlag('is_favorite')}
+              >
+                {item.is_favorite ? <FavoriteIcon color="error" /> : <FavoriteBorderIcon />}
+              </ViewerButton>
+              <ViewerButton title="Add to album" onClick={(e) => setAlbumAnchor(e.currentTarget)}>
+                <LibraryAddIcon />
+              </ViewerButton>
+              <ViewerButton
+                title={view === 'archive' ? 'Unarchive (e)' : 'Archive (e)'}
+                onClick={() => toggleFlag('is_archived')}
+              >
+                {view === 'archive' ? <UnarchiveIcon /> : <ArchiveIcon />}
+              </ViewerButton>
+              <ViewerButton
+                title={view === 'hidden' ? 'Unhide' : 'Hide'}
+                onClick={() => toggleFlag('is_hidden')}
+              >
+                {view === 'hidden' ? <VisibilityIcon /> : <VisibilityOffIcon />}
+              </ViewerButton>
+              <ViewerButton title="Move to trash (Delete)" onClick={() => toggleFlag('is_trashed')}>
+                <DeleteIcon />
+              </ViewerButton>
+            </>
+          )}
+          <ViewerButton title="Zoom out (-)" onClick={() => setZoom((z) => Math.max(z - 0.25, 1))}>
+            <ZoomOutIcon />
+          </ViewerButton>
+          <ViewerButton title="Zoom in (+)" onClick={() => setZoom((z) => Math.min(z + 0.25, 5))}>
+            <ZoomInIcon />
+          </ViewerButton>
+          <ViewerButton
+            title="Similar photos (s)"
+            onClick={() => setShowSimilar((v) => !v)}
+            active={showSimilar}
+          >
+            <AutoAwesomeMosaicIcon />
+          </ViewerButton>
+          <ViewerButton title="Info (i)" onClick={() => setShowInfo((s) => !s)} active={showInfo}>
+            <InfoOutlinedIcon />
+          </ViewerButton>
         </Box>
 
         {/* stage */}
@@ -274,9 +316,10 @@ export default function PhotoViewer({
           onMouseUp={() => (dragging.current = null)}
           onMouseLeave={() => (dragging.current = null)}
         >
-          {index > 0 && (
+          {!override && index > 0 && (
             <IconButton
               onClick={prev}
+              aria-label="Previous photo"
               sx={{ position: 'absolute', left: 12, top: '50%', color: '#fff', zIndex: 2 }}
             >
               <ChevronLeftIcon fontSize="large" />
@@ -300,7 +343,7 @@ export default function PhotoViewer({
             ) : (
               <img
                 src={displayUrl(item.id)}
-                alt={item.filename}
+                alt={`${item.filename}${item.taken_at ? `, taken ${new Date(item.taken_at).toLocaleDateString()}` : ''}`}
                 draggable={false}
                 style={{
                   maxWidth: '100%',
@@ -313,15 +356,69 @@ export default function PhotoViewer({
               />
             )}
           </Box>
-          {index < items.length - 1 && (
+          {!override && index < items.length - 1 && (
             <IconButton
               onClick={next}
+              aria-label="Next photo"
               sx={{ position: 'absolute', right: 12, top: '50%', color: '#fff', zIndex: 2 }}
             >
               <ChevronRightIcon fontSize="large" />
             </IconButton>
           )}
         </Box>
+
+        {showSimilar && (
+          <Box
+            role="region"
+            aria-label="Similar photos"
+            sx={{
+              height: 116,
+              px: 2,
+              pb: 1.5,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1,
+              overflowX: 'auto',
+              color: '#fff'
+            }}
+          >
+            {similar === null ? (
+              <CircularProgress size={24} sx={{ color: '#fff', mx: 'auto' }} />
+            ) : similar.length === 0 ? (
+              <Typography variant="body2" sx={{ opacity: 0.7, mx: 'auto' }}>
+                No similar photos yet. They appear once AI processing has run.
+              </Typography>
+            ) : (
+              similar.map((m) => (
+                <Box
+                  key={m.id}
+                  component="button"
+                  onClick={() => setOverride(m)}
+                  aria-label={`Open similar photo ${m.filename}`}
+                  sx={{
+                    flexShrink: 0,
+                    p: 0,
+                    border: 0,
+                    borderRadius: 1.5,
+                    overflow: 'hidden',
+                    cursor: 'pointer',
+                    outline: m.id === item.id ? '2px solid #8ab4f8' : 'none',
+                    '&:focus-visible': { outline: '2px solid #8ab4f8' },
+                    opacity: 0.85,
+                    '&:hover': { opacity: 1 }
+                  }}
+                >
+                  <img
+                    src={thumbUrl(m.id)}
+                    alt=""
+                    loading="lazy"
+                    style={{ height: 100, width: 'auto', display: 'block' }}
+                  />
+                </Box>
+              ))
+            )}
+          </Box>
+        )}
 
         {/* info drawer — force above the fullscreen viewer Modal (default
             Drawer z-index sits below it, which hid the panel entirely). */}
@@ -475,71 +572,12 @@ export default function PhotoViewer({
           </Box>
         </Drawer>
 
-        {/* Add-to-album menu */}
-        <Menu
+        <AlbumPickerMenu
           anchorEl={albumAnchor}
-          open={!!albumAnchor}
           onClose={() => setAlbumAnchor(null)}
-          sx={{ zIndex: (t) => t.zIndex.modal + 2 }}
-        >
-          {albums.length === 0 && (
-            <MenuItem disabled>No albums yet</MenuItem>
-          )}
-          {albums.map((a) => (
-            <MenuItem key={a.id} onClick={() => addToAlbum(a)}>
-              {a.name}
-            </MenuItem>
-          ))}
-          <Divider />
-          <MenuItem
-            onClick={() => {
-              setAlbumAnchor(null)
-              setNewAlbumOpen(true)
-            }}
-          >
-            <AddIcon fontSize="small" sx={{ mr: 1 }} /> New album…
-          </MenuItem>
-        </Menu>
-
-        {/* New-album dialog */}
-        <Dialog
-          open={newAlbumOpen}
-          onClose={() => setNewAlbumOpen(false)}
-          sx={{ zIndex: (t) => t.zIndex.modal + 2 }}
-        >
-          <DialogTitle>New album</DialogTitle>
-          <DialogContent>
-            <TextField
-              autoFocus
-              fullWidth
-              label="Album name"
-              value={newAlbumName}
-              onChange={(e) => setNewAlbumName(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && createAndAdd()}
-              sx={{ mt: 1 }}
-            />
-          </DialogContent>
-          <DialogActions>
-            <Button onClick={() => setNewAlbumOpen(false)}>Cancel</Button>
-            <Button variant="contained" onClick={createAndAdd}>
-              Create & add
-            </Button>
-          </DialogActions>
-        </Dialog>
-
-        <Snackbar
-          open={!!toast}
-          autoHideDuration={3000}
-          onClose={() => setToast(null)}
-          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
-          sx={{ zIndex: (t) => t.zIndex.modal + 3 }}
-        >
-          {toast ? (
-            <Alert severity="success" onClose={() => setToast(null)}>
-              {toast}
-            </Alert>
-          ) : undefined}
-        </Snackbar>
+          mediaIds={[item.id]}
+          overModal
+        />
       </Box>
     </Modal>
   )
@@ -555,5 +593,30 @@ function InfoRow({ label, value }: { label: string; value: string }): JSX.Elemen
         {value}
       </Typography>
     </Box>
+  )
+}
+
+function ViewerButton({
+  title,
+  onClick,
+  children,
+  active
+}: {
+  title: string
+  onClick: (e: React.MouseEvent<HTMLElement>) => void
+  children: React.ReactNode
+  active?: boolean
+}): JSX.Element {
+  return (
+    <Tooltip title={title}>
+      <IconButton
+        onClick={onClick}
+        aria-label={title}
+        aria-pressed={active}
+        sx={{ color: active ? '#8ab4f8' : '#fff' }}
+      >
+        {children}
+      </IconButton>
+    </Tooltip>
   )
 }
