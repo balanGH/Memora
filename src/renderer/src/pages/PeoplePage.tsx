@@ -15,6 +15,8 @@ import PersonIcon from '@mui/icons-material/Person'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
 import MergeIcon from '@mui/icons-material/Merge'
 import VisibilityIcon from '@mui/icons-material/Visibility'
+import BadgeIcon from '@mui/icons-material/Badge'
+import NamePeopleDialog from '../components/NamePeopleDialog'
 import { api, personFaceUrl, thumbUrl } from '../api/client'
 import type { Person } from '../api/types'
 
@@ -26,6 +28,7 @@ export default function PeoplePage(): JSX.Element {
   const [mergeMode, setMergeMode] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [merging, setMerging] = useState(false)
+  const [naming, setNaming] = useState(false)
   const navigate = useNavigate()
 
   const load = (): void => {
@@ -83,6 +86,8 @@ export default function PeoplePage(): JSX.Element {
     }
   }
 
+  const unnamed = people.filter((p) => !p.name).length
+
   const onCardClick = (p: Person): void => {
     if (mergeMode) toggleSelect(p.id)
     else navigate(`/people/${p.id}`)
@@ -132,6 +137,14 @@ export default function PeoplePage(): JSX.Element {
               </Button>
             )}
             <Button
+              variant="contained"
+              startIcon={<BadgeIcon />}
+              onClick={() => setNaming(true)}
+              disabled={unnamed === 0}
+            >
+              {unnamed > 0 ? `Name people (${unnamed})` : 'Everyone named'}
+            </Button>
+            <Button
               variant="outlined"
               startIcon={<MergeIcon />}
               onClick={() => setMergeMode(true)}
@@ -142,6 +155,15 @@ export default function PeoplePage(): JSX.Element {
           </Stack>
         )}
       </Stack>
+
+      <NamePeopleDialog
+        open={naming}
+        people={people}
+        onClose={() => {
+          setNaming(false)
+          load()
+        }}
+      />
 
       {loaded && people.length === 0 && (
         <Typography color="text.secondary">
@@ -179,6 +201,12 @@ export default function PeoplePage(): JSX.Element {
                 )}
                 <CardActionArea
                   onClick={() => onCardClick(p)}
+                  aria-label={
+                    mergeMode
+                      ? `${isSel ? 'Deselect' : 'Select'} ${p.name ?? 'unnamed person'} for merging`
+                      : `${p.name ?? 'Unnamed person'}, ${p.photo_count} photos`
+                  }
+                  aria-pressed={mergeMode ? isSel : undefined}
                   sx={{ p: 2, textAlign: 'center' }}
                 >
                   <Avatar
