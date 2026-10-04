@@ -344,11 +344,25 @@ do. No caller changes.
 | Map tiles proxied + cached on disk (offline after first view) | ✅ Working |
 | Export a person's photos preserving event folder structure | ✅ Working |
 | Search (people / object / scene / OCR / semantic) | ✅ Working (stub) |
-| Similar-image search | ✅ Working (stub) |
+| Similar-image search, in the viewer's "Similar" strip | ✅ Working (stub) |
+| Multi-select + bulk actions with Undo (click, Shift/Ctrl-click, drag, per-date) | ✅ Working |
+| Timeline scrubber (jump to any month) | ✅ Working |
+| Processing Center (pause / resume / cancel / retry failed) | ✅ Working |
+| Watch folders (auto-import) and removing a folder | ✅ Working |
+| Duplicate review (exact copies) | ✅ Working |
+| Search suggestions, filters (type / person / year / favorites) | ✅ Working |
+| "Who is this?" naming mode for unnamed people | ✅ Working |
+| Trash: restore all, empty (originals stay on disk) | ✅ Working |
 | Stable media ids + no-cache media responses (thumbnail correctness) | ✅ Working |
 | Real YOLO / CLIP / PaddleOCR | 🔌 Interface ready, not wired |
 | Non-destructive editing, desktop packaging | 🚧 Planned |
 
-## Keyboard shortcuts (viewer)
+## Keyboard shortcuts
 
-`←` / `→` navigate · `+` / `-` zoom · `0` reset zoom · `f` favorite · `i` info · `Esc` close
+Press `?` anywhere in the app for the full list.
+
+| Where | Keys |
+|-------|------|
+| Anywhere | `Ctrl+K` or `/` focus search · `?` shortcut list |
+| Photo grid | arrows / `Home` / `End` move · `Enter` open · `Space` select (`Shift` for a range) · `Ctrl+A` select all · `f` favorite · `e` archive · `Delete` trash · `Esc` clear selection |
+| Viewer | `←` / `→` navigate · `+` / `-` zoom · `0` reset zoom · `f` favorite · `e` archive · `Delete` trash · `s` similar photos · `i` info · `Esc` close |

@@ -48,3 +48,39 @@ body,
   text-align: center;
   padding-top: 2px;
 }
+
+/* Keyboard focus: always visible, never on mouse click. */
+:focus-visible {
+  outline: 2px solid var(--memora-focus, #1a73e8);
+  outline-offset: 2px;
+}
+
+/* Skip link: hidden until focused with Tab. */
+.memora-skip-link {
+  position: absolute;
+  left: 8px;
+  top: -48px;
+  z-index: 2000;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: var(--memora-focus, #1a73e8);
+  color: #fff;
+  font: 500 14px system-ui, sans-serif;
+  text-decoration: none;
+  transition: top 0.15s ease;
+}
+.memora-skip-link:focus {
+  top: 8px;
+}
+
+/* Respect the OS "reduce motion" setting. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
