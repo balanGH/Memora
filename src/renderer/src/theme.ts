@@ -23,6 +23,7 @@ export function buildTheme(mode: 'light' | 'dark'): Theme {
     components: {
       MuiCssBaseline: {
         styleOverrides: {
+          ':root': { '--memora-focus': mode === 'dark' ? '#8ab4f8' : '#1a73e8' },
           '::-webkit-scrollbar': { width: 10, height: 10 },
           '::-webkit-scrollbar-thumb': {
             background: mode === 'dark' ? '#3a3d45' : '#c9ccd1',

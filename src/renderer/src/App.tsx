@@ -17,6 +17,7 @@ import SettingsPage from './pages/SettingsPage'
 import ProcessingPage from './pages/ProcessingPage'
 import DuplicatesPage from './pages/DuplicatesPage'
 import { FeedbackProvider } from './context/FeedbackContext'
+import ShortcutsDialog from './components/ShortcutsDialog'
 
 const THEME_KEY = 'memora.theme'
 
@@ -52,11 +53,23 @@ export default function App(): JSX.Element {
       <ThemeProvider theme={theme}>
         <CssBaseline />
         <FeedbackProvider>
+        <a className="memora-skip-link" href="#memora-main" onClick={(e) => {
+          e.preventDefault()
+          document.getElementById('memora-main')?.focus()
+        }}>
+          Skip to content
+        </a>
+        <ShortcutsDialog />
         <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
           <Sidebar />
           <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
             <TopBar />
-            <Box sx={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+            <Box
+              component="main"
+              id="memora-main"
+              tabIndex={-1}
+              sx={{ flex: 1, minHeight: 0, overflow: 'hidden', outline: 'none' }}
+            >
               <Routes>
                 <Route path="/" element={<Navigate to="/photos" replace />} />
                 <Route path="/photos" element={<LibraryPage view="photos" />} />
