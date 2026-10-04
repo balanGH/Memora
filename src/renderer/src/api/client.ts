@@ -13,7 +13,8 @@ import type {
   RelationGraph,
   RelationSuggestion,
   ScanState,
-  SortKey
+  SortKey,
+  SystemInfo
 } from './types'
 
 let baseUrl = 'http://127.0.0.1:8756'
@@ -63,6 +64,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => req<{ status: string }>('/api/health'),
   stats: () => req<LibraryStats>('/api/stats'),
+  system: () => req<SystemInfo>('/api/system'),
 
   // folders + scanning
   folders: () => req<{ folders: Folder[] }>('/api/folders'),
