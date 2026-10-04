@@ -230,9 +230,23 @@ environment variable flips the seam.
 ### 1. Install the face packages into the backend venv
 
 ```bash
-backend/.venv/Scripts/python -m pip install insightface onnxruntime opencv-python
-# NVIDIA GPU instead of CPU:
-#   backend/.venv/Scripts/python -m pip install insightface onnxruntime-gpu opencv-python
+npm run backend:install-ai
+```
+
+This detects your GPU and installs InsightFace with the matching onnxruntime build:
+`onnxruntime-gpu` for NVIDIA, `onnxruntime-directml` for any other GPU on Windows
+(Intel Iris Xe / Arc, AMD), or plain `onnxruntime` for CPU and macOS.
+
+#### Automatic GPU detection
+
+At startup the backend checks the hardware (`backend/app/ai/device.py`) and runs the
+face model on the best device it can use: CUDA, then DirectML, then CoreML, then CPU.
+If onnxruntime can't initialise the GPU it falls back to the CPU. **Settings → Indexing
+& AI** shows the GPU it found, which device is in use, and which package to install when a
+GPU is present but unused. `GET /api/system` returns the same data. To force a device:
+
+```bash
+$env:MEMORA_DEVICE = "cpu"   # or cuda | directml | coreml | auto (default)
 ```
 
 > **Python version note:** InsightFace and onnxruntime ship prebuilt wheels for
@@ -254,8 +268,9 @@ wipe.)*
 
 ### 3. Launch with the real backend enabled
 
-The `MEMORA_FACE_BACKEND` env var is read by the backend and flows through Electron
-automatically.
+Once InsightFace is installed it is used automatically (`MEMORA_FACE_BACKEND=auto`, the
+default). Set `MEMORA_FACE_BACKEND=stub` to keep the stub, or `insightface` to require it.
+The env var is read by the backend and flows through Electron automatically.
 
 ```bash
 # Windows (PowerShell)
@@ -271,7 +286,7 @@ Then open **Settings → Run AI processing**. The first run downloads the Insigh
 afterward is fully offline. The backend log prints:
 
 ```
-[memora.ai] face backend: InsightFace (real)
+[memora.ai] face backend: InsightFace, providers=['DmlExecutionProvider', 'CPUExecutionProvider']
 ```
 
 Now the **People** page shows real **cropped faces** (via `GET /api/people/{id}/face`),
@@ -296,6 +311,7 @@ $env:MEMORA_FACE_THRESHOLD = "0.38"   # PowerShell; looser grouping
 |---------|------|
 | Real face model | `backend/app/ai/real.py` — `RealFaceService` |
 | Backend selection | `backend/app/ai/__init__.py` — `get_ai()` reads `MEMORA_FACE_BACKEND` |
+| GPU detection | `backend/app/ai/device.py` — `detect_device()` reads `MEMORA_DEVICE` |
 | Match threshold | `backend/app/ai/interfaces.py` — `AIServices.face_match_threshold` |
 | Clustering | `backend/app/ai_pipeline.py` — `_assign_person()` |
 | Face crop | `backend/app/media_utils.py` — `crop_face()` + `/api/people/{id}/face` |
@@ -319,7 +335,8 @@ do. No caller changes.
 | Editable per-photo tags (add / delete, persisted) | ✅ Working |
 | People clustering, rename, hide + **unhide** | ✅ Working (stub or real InsightFace) |
 | People **merge**, **split** (fix grouping), **choose thumbnail** | ✅ Working |
-| Real face recognition (InsightFace) + cropped-face avatars | ✅ Wired — enable via `MEMORA_FACE_BACKEND=insightface` |
+| Real face recognition (InsightFace) + cropped-face avatars | ✅ Wired — used automatically once installed |
+| Automatic GPU detection (CUDA / DirectML / CoreML / CPU) | ✅ Working |
 | Relations — interactive graph, tree view, edit/delete, suggestions | ✅ Working |
 | Relations — auto-connect (co-occurrence) + family (age) suggestions | ✅ Working (age needs real backend) |
 | Places — interactive Leaflet map + timeline filmstrip | ✅ Working |

@@ -15,9 +15,14 @@ python-multipart>=0.0.12
 # pillow-heif>=0.16
 
 # --- Real AI models (NOT installed for the stubbed vertical slice) ---
-# Uncomment and `pip install` these when swapping StubAI for real implementations.
+# `npm run backend:install-ai` installs insightface + the right onnxruntime for
+# your hardware automatically. Once insightface is installed the backend uses it
+# by default and picks the GPU on its own (see app/ai/device.py).
 # insightface        # face detection + embeddings
-# onnxruntime        # runtime for insightface
+# onnxruntime        # runtime for insightface. Install exactly ONE of:
+#                    #   onnxruntime-gpu       NVIDIA (CUDA)
+#                    #   onnxruntime-directml  any GPU on Windows (Intel/AMD/NVIDIA)
+#                    #   onnxruntime           CPU, or Apple CoreML on macOS
 # ultralytics        # YOLO object detection
 # open-clip-torch    # CLIP image/text embeddings
 # paddleocr          # OCR

@@ -13,6 +13,7 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "backend:install": "node scripts/setup-backend.mjs",
+    "backend:install-ai": "node scripts/setup-backend.mjs --ai",
     "backend:dev": "python backend/run.py"
   },
   "dependencies": {

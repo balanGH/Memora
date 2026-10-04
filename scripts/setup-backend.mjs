@@ -2,6 +2,7 @@
 // Invoked via `npm run backend:install`. Avoids shell path/quoting pitfalls
 // (notably cmd.exe treating '/' as an option char) by resolving paths in Node.
 import { spawnSync } from 'node:child_process'
+import { platform } from 'node:os'
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
@@ -37,4 +38,36 @@ if (!existsSync(venvPython)) {
 }
 run(venvPython, ['-m', 'pip', 'install', '--upgrade', 'pip'])
 run(venvPython, ['-m', 'pip', 'install', '-r', join(backend, 'requirements.txt')])
+
+// `--ai`: install real face recognition with the onnxruntime build that
+// matches this machine's GPU (detected by backend/app/ai/device.py).
+if (process.argv.includes('--ai')) {
+  const probe = spawnSync(
+    venvPython,
+    ['-c', 'import json; from app.ai.device import detect_gpus, recommended_package as r; ' +
+      'g = detect_gpus(); print(json.dumps({"gpus": [x.name for x in g], "pkg": r(g)}))'],
+    { cwd: backend, encoding: 'utf8' }
+  )
+  let detected = { gpus: [], pkg: null }
+  try {
+    detected = JSON.parse(probe.stdout.trim().split('\n').pop())
+  } catch {
+    console.warn('GPU probe failed; falling back to the CPU build of onnxruntime.')
+  }
+  const ort = detected.pkg ?? 'onnxruntime'
+  console.log(`\nGPUs found: ${detected.gpus.join(', ') || 'none'}`)
+  console.log(`Using onnxruntime build: ${ort}`)
+  // The onnxruntime builds conflict with each other; keep exactly one.
+  const builds = ['onnxruntime', 'onnxruntime-gpu', 'onnxruntime-directml']
+  spawnSync(venvPython, ['-m', 'pip', 'uninstall', '-y', ...builds.filter((b) => b !== ort)], {
+    stdio: 'inherit'
+  })
+  run(venvPython, ['-m', 'pip', 'install', 'insightface', 'opencv-python', ort])
+  if (ort === 'onnxruntime-gpu' && platform() === 'win32') {
+    console.log(
+      'Note: CUDA needs the NVIDIA CUDA 12 + cuDNN 9 runtime. If it is missing, Memora\n' +
+        'falls back to CPU (Settings shows this). onnxruntime-directml works without it.'
+    )
+  }
+}
 console.log('\n✔ Backend environment ready.')
