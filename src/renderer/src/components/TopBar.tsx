@@ -1,30 +1,18 @@
-import { useState, KeyboardEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
 import {
   AppBar,
   Toolbar,
-  InputBase,
   Box,
   IconButton,
-  Tooltip,
-  alpha
+  Tooltip
 } from '@mui/material'
-import SearchIcon from '@mui/icons-material/Search'
 import DarkModeIcon from '@mui/icons-material/DarkMode'
 import LightModeIcon from '@mui/icons-material/LightMode'
 import { useColorMode } from '../context/ColorModeContext'
 import ProgressPill from './ProgressPill'
+import SearchBox from './SearchBox'
 
 export default function TopBar(): JSX.Element {
   const { mode, toggle } = useColorMode()
-  const navigate = useNavigate()
-  const [q, setQ] = useState('')
-
-  const onSearch = (e: KeyboardEvent<HTMLInputElement>): void => {
-    if (e.key === 'Enter' && q.trim()) {
-      navigate(`/search?q=${encodeURIComponent(q.trim())}`)
-    }
-  }
 
   return (
     <AppBar
@@ -34,33 +22,14 @@ export default function TopBar(): JSX.Element {
       sx={{ borderBottom: (t) => `1px solid ${t.palette.divider}` }}
     >
       <Toolbar sx={{ gap: 2 }}>
-        <Box
-          sx={{
-            display: 'flex',
-            alignItems: 'center',
-            bgcolor: (t) => alpha(t.palette.text.primary, mode === 'dark' ? 0.08 : 0.05),
-            borderRadius: 999,
-            px: 2,
-            py: 0.5,
-            width: 'min(560px, 45vw)'
-          }}
-        >
-          <SearchIcon fontSize="small" sx={{ mr: 1, opacity: 0.6 }} />
-          <InputBase
-            fullWidth
-            placeholder='Search your photos — try "dog", "beach", "sunset"'
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={onSearch}
-          />
-        </Box>
+        <SearchBox dark={mode === 'dark'} />
 
         <Box sx={{ flex: 1 }} />
 
         <ProgressPill />
 
         <Tooltip title={mode === 'dark' ? 'Light theme' : 'Dark theme'}>
-          <IconButton onClick={toggle}>
+          <IconButton onClick={toggle} aria-label={mode === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}>
             {mode === 'dark' ? <LightModeIcon /> : <DarkModeIcon />}
           </IconButton>
         </Tooltip>
