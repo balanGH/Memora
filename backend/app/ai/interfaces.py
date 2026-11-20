@@ -28,6 +28,8 @@ class DetectedFace:
     # Estimated by the real backend; None for the stub (no age/gender signal).
     age: Optional[float] = None
     gender: Optional[str] = None  # 'M' | 'F'
+    # Detector confidence (0..1) when the model reports one.
+    score: Optional[float] = None
 
 
 @dataclass
@@ -65,6 +67,29 @@ class EmbeddingService(Protocol):
     def embed_text(self, query: str) -> list[float]: ...
 
 
+class DisabledService:
+    """Stand-in for a service with no model available: produces nothing.
+
+    Writing *nothing* is the honest result when no model is installed; the
+    stub's made-up faces and tags must never reach a real library by default.
+    """
+
+    def detect(self, image_path: Path) -> list[DetectedFace]:
+        return []
+
+    def tag(self, image_path: Path) -> list[DetectedTag]:
+        return []
+
+    def read_text(self, image_path: Path) -> str:
+        return ""
+
+    def embed_image(self, image_path: Path) -> list[float]:
+        return []
+
+    def embed_text(self, query: str) -> list[float]:
+        return []
+
+
 @dataclass
 class AIServices:
     faces: FaceService
@@ -74,17 +99,39 @@ class AIServices:
     # Cosine-similarity threshold above which two faces are the same person.
     # Depends on the embedding space: stub uses ~0.92, InsightFace ~0.45.
     face_match_threshold: float = 0.92
-    # Human-readable name of the face backend ('stub' | 'insightface').
+    # Matches within this margin above the threshold are "uncertain" and are
+    # listed for manual review instead of being trusted silently (B31).
+    face_review_margin: float = 0.08
+    # Human-readable name of the face backend ('stub' | 'insightface' | 'none').
     backend: str = "stub"
     # Execution providers actually in use, e.g. ['DmlExecutionProvider', 'CPUExecutionProvider'].
     providers: list[str] = field(default_factory=lambda: ["CPUExecutionProvider"])
+    # Model identifier per service ("<family>/<version>"), None = disabled.
+    # Stored with every result so incompatible outputs are never mixed (B29).
+    face_model: Optional[str] = "stub/v1"
+    tags_model: Optional[str] = "stub/v1"
+    ocr_model: Optional[str] = "stub/v1"
+    embed_model: Optional[str] = "stub/v1"
+    # True only for a real image-text model (CLIP-like). Stub hash vectors
+    # carry no meaning and must not drive search results.
+    semantic_embeddings: bool = False
+    # Model initialisation failures, shown in Settings / Processing (B08).
+    init_errors: list[str] = field(default_factory=list)
+
+    def models(self) -> dict[str, Optional[str]]:
+        return {
+            "faces": self.face_model,
+            "tags": self.tags_model,
+            "ocr": self.ocr_model,
+            "embed": self.embed_model,
+        }
 
     def analyze(self, image_path: Path) -> AIResult:
         return AIResult(
-            faces=self.faces.detect(image_path),
-            tags=self.tagging.tag(image_path),
-            ocr_text=self.ocr.read_text(image_path),
-            clip_embedding=self.embeddings.embed_image(image_path),
+            faces=self.faces.detect(image_path) if self.face_model else [],
+            tags=self.tagging.tag(image_path) if self.tags_model else [],
+            ocr_text=self.ocr.read_text(image_path) if self.ocr_model else "",
+            clip_embedding=self.embeddings.embed_image(image_path) if self.embed_model else [],
         )
 
 
