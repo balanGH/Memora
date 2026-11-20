@@ -12,13 +12,17 @@ export interface GEdge {
   b: number
   label: string
   directed: boolean
+  /** Precomputed colour (wins over the edgeColor callback). */
+  color?: string
 }
 
 interface Props {
   nodes: GNode[]
   edges: GEdge[]
   onOpen: (id: number) => void
-  edgeColor: (label: string) => string
+  edgeColor?: (label: string) => string
+  /** People to ring (e.g. search matches). */
+  highlight?: Set<number>
   /** Bump this to recenter the view (reset pan/zoom) and re-settle the layout. */
   resetSignal?: number
   /** 'force' = physics graph; 'tree' = layered generations (parent above child). */
@@ -125,6 +129,7 @@ export default function ForceGraph({
   edges,
   onOpen,
   edgeColor,
+  highlight,
   resetSignal = 0,
   layout = 'force'
 }: Props): JSX.Element {
@@ -387,7 +392,7 @@ export default function ForceGraph({
           const a = map.get(e.a)
           const b = map.get(e.b)
           if (!a || !b) return null
-          const col = edgeColor(e.label)
+          const col = e.color ?? edgeColor?.(e.label) ?? '#8ab4f8'
           const mx = (a.x + b.x) / 2
           const my = (a.y + b.y) / 2
           return (
@@ -454,8 +459,8 @@ export default function ForceGraph({
                 cy={p.y}
                 r={r}
                 fill="none"
-                stroke={hover === n.id ? '#8ab4f8' : '#ffffff'}
-                strokeWidth={hover === n.id ? 3 : 2}
+                stroke={hover === n.id ? '#8ab4f8' : highlight?.has(n.id) ? '#fdd663' : '#ffffff'}
+                strokeWidth={hover === n.id || highlight?.has(n.id) ? 3.5 : 2}
               />
               <text
                 x={p.x}

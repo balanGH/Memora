@@ -9,8 +9,12 @@ import {
   CardActionArea,
   Button,
   Stack,
-  Tooltip
+  Tooltip,
+  ToggleButton,
+  ToggleButtonGroup
 } from '@mui/material'
+import GridViewIcon from '@mui/icons-material/GridView'
+import HubIcon from '@mui/icons-material/Hub'
 import PersonIcon from '@mui/icons-material/Person'
 import CheckCircleIcon from '@mui/icons-material/CheckCircle'
 import MergeIcon from '@mui/icons-material/Merge'
@@ -125,7 +129,15 @@ export default function PeoplePage(): JSX.Element {
             </Button>
           </Stack>
         ) : (
-          <Stack direction="row" spacing={1}>
+          <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', rowGap: 1 }}>
+            <ToggleButtonGroup size="small" exclusive value="people" aria-label="People view">
+              <ToggleButton value="people">
+                <GridViewIcon fontSize="small" sx={{ mr: 0.5 }} /> People
+              </ToggleButton>
+              <ToggleButton value="graph" onClick={() => navigate('/relations')}>
+                <HubIcon fontSize="small" sx={{ mr: 0.5 }} /> Graph
+              </ToggleButton>
+            </ToggleButtonGroup>
             {hidden.length > 0 && (
               <Button
                 variant={showHidden ? 'contained' : 'outlined'}

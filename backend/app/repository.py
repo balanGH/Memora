@@ -8,7 +8,7 @@ from typing import Literal, Optional
 
 from .ai import get_ai
 from .ai.interfaces import cosine_similarity
-from .db import PRUNE_EMPTY_PEOPLE_SQL, get_conn, transaction
+from .db import PRUNE_EMPTY_PEOPLE_SQL, RELATION_KINDS, get_conn, transaction
 
 SortKey = Literal["newest", "oldest", "favorites", "added"]
 
@@ -954,39 +954,130 @@ def media_for_place(key: str, limit: int = 500) -> list[dict]:
 
 # ------------------------------------------------------------- Relations ----
 
-def add_relation(
-    person_a: int, person_b: int, label: str = "", directed: bool = False
-) -> dict:
-    """Create/update a labeled link between two people.
+class RelationConflict(ValueError):
+    """The two people already have a relationship (one edge per pair)."""
 
-    Directed links (parent->child) keep the given a->b order; undirected links
-    (spouse, friend…) are stored with person_a < person_b so each pair is unique
-    regardless of which side the user picked first.
+    def __init__(self, existing: dict):
+        super().__init__("These two people are already related")
+        self.existing = existing
+
+
+MAX_LABEL = 60
+_REL_COLS = "id, person_a, person_b, label, directed, kind, created_at, updated_at"
+
+
+def normalize_relation(
+    kind: Optional[str], label: Optional[str], directed: Optional[bool]
+) -> tuple[str, str, bool]:
+    """Validate a relationship type and return (kind, label, directed).
+
+    Preset kinds fix the label and direction (parent/child are directed,
+    everything else symmetric). 'custom' needs a non-empty label and lets the
+    user choose the direction. Requests without ``kind`` (older clients) are
+    mapped from their label.
     """
-    if person_a == person_b:
+    label = (label or "").strip()
+    if kind is None:
+        guess = label.lower()
+        kind = guess if guess in RELATION_KINDS and guess != "custom" else "custom"
+        if kind != "custom" and directed is not None and bool(directed) != RELATION_KINDS[kind]:
+            kind = "custom"  # e.g. a directed "friend": keep exactly what was asked
+    kind = kind.strip().lower()
+    if kind not in RELATION_KINDS:
+        raise ValueError(
+            f"Unknown relationship type '{kind}'. Use one of: {', '.join(RELATION_KINDS)}"
+        )
+    if kind == "custom":
+        if not label:
+            raise ValueError("A custom relationship needs a label")
+        if len(label) > MAX_LABEL:
+            raise ValueError(f"Label is too long (max {MAX_LABEL} characters)")
+        return kind, label, bool(directed)
+    return kind, kind, bool(RELATION_KINDS[kind])
+
+
+def _ordered_pair(a: int, b: int, directed: bool) -> tuple[int, int]:
+    """Directed links keep a->b; symmetric ones are stored with a < b."""
+    return (a, b) if directed or a < b else (b, a)
+
+
+def _check_people(conn, a: int, b: int) -> None:
+    if a == b:
         raise ValueError("A person can't be related to themselves")
-    if directed:
-        a, b = person_a, person_b
-    else:
-        a, b = (person_a, person_b) if person_a < person_b else (person_b, person_a)
-    label = label.strip()
+    found = {r["id"] for r in conn.execute("SELECT id FROM people WHERE id IN (?, ?)", (a, b))}
+    missing = [x for x in (a, b) if x not in found]
+    if missing:
+        raise LookupError(f"Person {missing[0]} not found (deleted or merged)")
+
+
+def _pair_relation(conn, a: int, b: int, exclude_id: Optional[int] = None) -> Optional[dict]:
+    row = conn.execute(
+        f"SELECT {_REL_COLS} FROM relationships WHERE "
+        "((person_a = ? AND person_b = ?) OR (person_a = ? AND person_b = ?)) AND id IS NOT ?",
+        (a, b, b, a, exclude_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_relation(rel_id: int) -> Optional[dict]:
+    row = get_conn().execute(
+        f"SELECT {_REL_COLS} FROM relationships WHERE id = ?", (rel_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def add_relation(
+    person_a: int, person_b: int, label: str = "", directed: Optional[bool] = None,
+    kind: Optional[str] = None, replace: bool = False,
+) -> dict:
+    """Create a labeled link between two existing people.
+
+    There is at most one relationship per pair of people (enforced by a
+    unique index). If one exists, ``RelationConflict`` is raised unless
+    ``replace`` is set, in which case it is replaced atomically.
+    """
+    kind, label, directed = normalize_relation(kind, label, directed)
+    a, b = _ordered_pair(person_a, person_b, directed)
     with transaction() as conn:
-        # A pair is unique in either order — replace an existing reverse row too.
+        _check_people(conn, a, b)
+        existing = _pair_relation(conn, a, b)
+        if existing and not replace:
+            raise RelationConflict(existing)
+        if existing:
+            conn.execute("DELETE FROM relationships WHERE id = ?", (existing["id"],))
+        rid = conn.execute(
+            "INSERT INTO relationships (person_a, person_b, label, directed, kind) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (a, b, label, int(directed), kind),
+        ).lastrowid
+        row = conn.execute(f"SELECT {_REL_COLS} FROM relationships WHERE id = ?", (rid,)).fetchone()
+    return dict(row)
+
+
+def update_relation(
+    rel_id: int, person_a: int, person_b: int, label: str = "",
+    directed: Optional[bool] = None, kind: Optional[str] = None,
+) -> Optional[dict]:
+    """Change a relationship in place (type, label, direction or people).
+
+    Atomic: on any validation error the original relationship is untouched.
+    Returns None if ``rel_id`` doesn't exist.
+    """
+    kind, label, directed = normalize_relation(kind, label, directed)
+    a, b = _ordered_pair(person_a, person_b, directed)
+    with transaction() as conn:
+        if not conn.execute("SELECT 1 FROM relationships WHERE id = ?", (rel_id,)).fetchone():
+            return None
+        _check_people(conn, a, b)
+        clash = _pair_relation(conn, a, b, exclude_id=rel_id)
+        if clash:
+            raise RelationConflict(clash)
         conn.execute(
-            "DELETE FROM relationships WHERE (person_a = ? AND person_b = ?) "
-            "OR (person_a = ? AND person_b = ?)",
-            (a, b, b, a),
+            "UPDATE relationships SET person_a = ?, person_b = ?, label = ?, directed = ?, "
+            "kind = ?, updated_at = datetime('now') WHERE id = ?",
+            (a, b, label, int(directed), kind, rel_id),
         )
-        cur = conn.execute(
-            "INSERT INTO relationships (person_a, person_b, label, directed) "
-            "VALUES (?, ?, ?, ?)",
-            (a, b, label, int(directed)),
-        )
-        rid = cur.lastrowid
-        row = conn.execute(
-            "SELECT id, person_a, person_b, label, directed FROM relationships WHERE id = ?",
-            (rid,),
-        ).fetchone()
+        row = conn.execute(f"SELECT {_REL_COLS} FROM relationships WHERE id = ?", (rel_id,)).fetchone()
     return dict(row)
 
 
@@ -1002,7 +1093,7 @@ def relation_graph() -> dict:
     edges = [
         dict(e)
         for e in conn.execute(
-            "SELECT id, person_a, person_b, label, directed FROM relationships"
+            f"SELECT {_REL_COLS} FROM relationships ORDER BY id"
         ).fetchall()
     ]
     ids: set[int] = set()
@@ -1015,7 +1106,7 @@ def relation_graph() -> dict:
         nodes = [
             dict(r)
             for r in conn.execute(
-                f"""SELECT p.id, p.name, p.cover_media_id,
+                f"""SELECT p.id, p.name, p.cover_media_id, p.is_hidden,
                           COUNT(DISTINCT f.media_id) AS photo_count
                    FROM people p LEFT JOIN faces f ON f.person_id = p.id
                    WHERE p.id IN ({placeholders})
@@ -1026,43 +1117,72 @@ def relation_graph() -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
-def auto_connect(min_shared: int = 2, label: str = "appears with") -> int:
-    """Auto-create undirected links for people who appear together in at least
-    ``min_shared`` photos and aren't already related. Returns the count created.
-
-    Only who-is-connected is inferred (photos can't reveal the relationship
-    type), so the links get a generic label the user can rename afterwards.
-    """
+def auto_connect_preview(min_shared: int = 2, limit: int = 200) -> list[dict]:
+    """People photographed together at least ``min_shared`` times who aren't
+    related yet. Read-only: nothing is saved until the user confirms pairs
+    (``auto_connect``). Photos can't reveal the relationship type."""
     conn = get_conn()
-    existing: set[tuple[int, int]] = set()
-    for r in conn.execute("SELECT person_a, person_b FROM relationships").fetchall():
-        existing.add((r["person_a"], r["person_b"]))
-        existing.add((r["person_b"], r["person_a"]))
-
-    pairs = conn.execute(
+    rows = conn.execute(
         """SELECT f1.person_id AS a, f2.person_id AS b,
                   COUNT(DISTINCT f1.media_id) AS shared
            FROM faces f1
            JOIN faces f2
              ON f1.media_id = f2.media_id AND f1.person_id < f2.person_id
            WHERE f1.person_id IS NOT NULL AND f2.person_id IS NOT NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM relationships r
+                 WHERE min(r.person_a, r.person_b) = f1.person_id
+                   AND max(r.person_a, r.person_b) = f2.person_id)
            GROUP BY f1.person_id, f2.person_id
-           HAVING shared >= ?""",
-        (max(1, min_shared),),
+           HAVING shared >= ?
+           ORDER BY shared DESC LIMIT ?""",
+        (max(1, min_shared), limit),
     ).fetchall()
+    out = [{"a": r["a"], "b": r["b"], "shared": r["shared"]} for r in rows]
+    _attach_names(conn, out, ("a", "b"))
+    return out
 
+
+def auto_connect(pairs: list[tuple[int, int]], label: str = "appears with") -> int:
+    """Create symmetric custom links for the pairs the user confirmed.
+
+    Pairs that are already related, self-pairs and unknown people are skipped.
+    Returns how many were created.
+    """
+    kind, label, directed = normalize_relation("custom", label, False)
     created = 0
-    with transaction() as tx:
-        for r in pairs:
-            if (r["a"], r["b"]) in existing:
+    with transaction() as conn:
+        for pa, pb in pairs:
+            if pa == pb:
                 continue
-            cur = tx.execute(
-                "INSERT OR IGNORE INTO relationships (person_a, person_b, label, directed) "
-                "VALUES (?, ?, ?, 0)",
-                (r["a"], r["b"], label),
+            a, b = _ordered_pair(pa, pb, directed)
+            try:
+                _check_people(conn, a, b)
+            except (LookupError, ValueError):
+                continue
+            if _pair_relation(conn, a, b):
+                continue
+            conn.execute(
+                "INSERT INTO relationships (person_a, person_b, label, directed, kind) "
+                "VALUES (?, ?, ?, 0, ?)",
+                (a, b, label, kind),
             )
-            created += cur.rowcount
+            created += 1
     return created
+
+
+def _attach_names(conn, items: list[dict], keys: tuple[str, ...]) -> None:
+    ids = {it[k] for it in items for k in keys}
+    names: dict[int, Optional[str]] = {}
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        for r in conn.execute(
+            f"SELECT id, name FROM people WHERE id IN ({placeholders})", tuple(ids)
+        ):
+            names[r["id"]] = r["name"]
+    for it in items:
+        for k in keys:
+            it[f"{k}_name"] = names.get(it[k])
 
 
 def family_suggestions(min_gap: float = 15.0, min_shared: int = 1, limit: int = 12) -> list[dict]:

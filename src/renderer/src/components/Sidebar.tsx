@@ -43,7 +43,7 @@ const NAV: NavEntry[] = [
   { to: '/people', label: 'People', icon: <PeopleIcon />, countKey: 'people' },
   { to: '/search', label: 'Search', icon: <SearchIcon /> },
   { to: '/places', label: 'Places', icon: <PublicIcon /> },
-  { to: '/relations', label: 'Relations', icon: <HubIcon /> },
+  { to: '/relations', label: 'People graph', icon: <HubIcon /> },
   { to: '/albums', label: 'Albums', icon: <CollectionsBookmarkIcon /> },
   { to: '/favorites', label: 'Favorites', icon: <FavoriteIcon />, countKey: 'favorites' },
   { to: '/archive', label: 'Archive', icon: <ArchiveIcon />, countKey: 'archived' },
