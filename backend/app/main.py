@@ -29,7 +29,7 @@ from . import ai_pipeline, db, maintenance, repository, scanner, tiles, watcher
 from .ai import system_info
 from .ai.device import describe, detect_device
 from .config import API_TOKEN, HOST, LOOPBACK_HOSTS, PORT, TOKEN_HEADER
-from .db import get_conn, init_db
+from .db import RELATION_KINDS, get_conn, init_db
 from .media_utils import crop_face, generate_display, is_web_safe
 
 _server = None  # uvicorn.Server, set by run() so shutdown can be requested
@@ -120,7 +120,7 @@ async def _access_control(request: Request, call_next):
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^(null|file://.*|https?://(localhost|127\.0\.0\.1)(:\d+)?)$",
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", TOKEN_HEADER],
 )
 
@@ -653,33 +653,81 @@ def get_family_suggestions() -> dict:
     return {"suggestions": repository.family_suggestions()}
 
 
+@app.get("/api/relations/types")
+def get_relation_types() -> dict:
+    """Valid relationship types and whether each is directional (None = user's choice)."""
+    return {"types": [{"kind": k, "directed": d} for k, d in RELATION_KINDS.items()]}
+
+
+@app.get("/api/relations/auto")
+def get_auto_connect_preview(min_shared: int = 2) -> dict:
+    """Proposed links from co-occurrence. Nothing is saved by this call."""
+    return {"pairs": repository.auto_connect_preview(min_shared)}
+
+
+class PairIn(BaseModel):
+    a: int
+    b: int
+
+
 class AutoConnectIn(BaseModel):
-    min_shared: int = 2
+    pairs: list[PairIn] = Field(default_factory=list)
     label: str = "appears with"
 
 
 @app.post("/api/relations/auto")
 def post_auto_connect(body: AutoConnectIn) -> dict:
-    return {"created": repository.auto_connect(body.min_shared, body.label)}
+    """Save only the pairs the user explicitly confirmed in the preview."""
+    if not body.pairs:
+        raise HTTPException(
+            status_code=400,
+            detail="Confirm the pairs to connect (GET /api/relations/auto lists proposals)",
+        )
+    try:
+        created = repository.auto_connect([(p.a, p.b) for p in body.pairs], body.label)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"created": created}
 
 
 class RelationIn(BaseModel):
     person_a: int
     person_b: int
+    kind: Optional[str] = None
     label: str = ""
-    directed: bool = False
+    directed: Optional[bool] = None
+    replace: bool = False
+
+
+def _relation_errors(fn):
+    try:
+        return fn()
+    except repository.RelationConflict as e:
+        raise HTTPException(
+            status_code=409, detail={"message": str(e), "existing": e.existing}
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/api/relations")
 def post_relation(body: RelationIn) -> dict:
-    try:
-        return {
-            "relation": repository.add_relation(
-                body.person_a, body.person_b, body.label, body.directed
-            )
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    rel = _relation_errors(lambda: repository.add_relation(
+        body.person_a, body.person_b, body.label, body.directed, body.kind, body.replace
+    ))
+    return {"relation": rel}
+
+
+@app.put("/api/relations/{rel_id}")
+def put_relation(rel_id: int, body: RelationIn) -> dict:
+    rel = _relation_errors(lambda: repository.update_relation(
+        rel_id, body.person_a, body.person_b, body.label, body.directed, body.kind
+    ))
+    if rel is None:
+        raise HTTPException(status_code=404, detail="Relationship not found")
+    return {"relation": rel}
 
 
 @app.delete("/api/relations/{rel_id}")

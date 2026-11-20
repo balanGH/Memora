@@ -352,16 +352,58 @@ def _m2_integrity_and_versioning(conn: sqlite3.Connection) -> None:
     )
 
 
-# Delete people that have no faces left.
+# Relationship types: key -> directed? (None = user chooses, for 'custom').
+RELATION_KINDS: dict[str, Optional[bool]] = {
+    "parent": True,     # person_a is a parent of person_b
+    "child": True,      # person_a is a child of person_b
+    "spouse": False,
+    "sibling": False,
+    "friend": False,
+    "relative": False,
+    "colleague": False,
+    "custom": None,
+}
+
+# Delete people that have no faces left, EXCEPT people the user connected in
+# the relationship graph: dropping them would cascade-delete those
+# relationships silently (e.g. after emptying the trash).
 PRUNE_EMPTY_PEOPLE_SQL = (
     "DELETE FROM people WHERE id NOT IN "
-    "(SELECT DISTINCT person_id FROM faces WHERE person_id IS NOT NULL)"
+    "(SELECT DISTINCT person_id FROM faces WHERE person_id IS NOT NULL) "
+    "AND id NOT IN (SELECT person_a FROM relationships) "
+    "AND id NOT IN (SELECT person_b FROM relationships)"
 )
+
+
+def _m3_relationship_kinds(conn: sqlite3.Connection) -> None:
+    """Explicit, validated relationship type + DB-level pair uniqueness."""
+    _ensure_column(conn, "relationships", "kind", "TEXT NOT NULL DEFAULT 'custom'")
+    _ensure_column(conn, "relationships", "updated_at", "TEXT")
+    for kind, directed in RELATION_KINDS.items():
+        if kind == "custom":
+            continue
+        conn.execute(
+            "UPDATE relationships SET kind = ? WHERE lower(trim(label)) = ? AND directed = ?",
+            (kind, kind, int(bool(directed))),
+        )
+    # One relationship per unordered pair: keep the oldest if both (a,b) and
+    # (b,a) somehow exist, then let the database enforce it from now on.
+    conn.execute(
+        """DELETE FROM relationships WHERE id NOT IN (
+               SELECT MIN(id) FROM relationships
+               GROUP BY min(person_a, person_b), max(person_a, person_b))"""
+    )
+    conn.execute("DELETE FROM relationships WHERE person_a = person_b")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_relationships_pair ON relationships("
+        "min(person_a, person_b), max(person_a, person_b))"
+    )
 
 
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "baseline schema + stable media ids", _m1_baseline),
     (2, "integrity, provenance, missing files, AI versioning", _m2_integrity_and_versioning),
+    (3, "relationship kinds + unique unordered pairs", _m3_relationship_kinds),
 ]
 LATEST_VERSION = MIGRATIONS[-1][0]
 

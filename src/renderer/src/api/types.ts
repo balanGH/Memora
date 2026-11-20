@@ -108,13 +108,34 @@ export interface RelationNode {
   name: string | null
   cover_media_id: number | null
   photo_count?: number
+  is_hidden?: number
 }
+export type RelationKind =
+  | 'parent'
+  | 'child'
+  | 'spouse'
+  | 'sibling'
+  | 'friend'
+  | 'relative'
+  | 'colleague'
+  | 'custom'
 export interface RelationEdge {
   id: number
   person_a: number
   person_b: number
   label: string
   directed: number
+  kind?: RelationKind
+  created_at?: string
+  updated_at?: string | null
+}
+export interface RelationInput {
+  person_a: number
+  person_b: number
+  kind: RelationKind
+  label?: string
+  directed?: boolean
+  replace?: boolean
 }
 export interface RelationGraph {
   nodes: RelationNode[]

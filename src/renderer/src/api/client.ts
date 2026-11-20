@@ -11,6 +11,7 @@ import type {
   FamilySuggestion,
   RelationEdge,
   RelationGraph,
+  RelationInput,
   RelationSuggestion,
   ScanState,
   SortKey,
@@ -56,6 +57,17 @@ export function tileUrlTemplate(style: 'light' | 'dark' | 'voyager'): string {
   return `${baseUrl}/api/tile/${style}/{z}/{x}/{y}`
 }
 
+/** Error from the backend, with the HTTP status and parsed `detail`. */
+export class ApiError extends Error {
+  status: number
+  detail: unknown
+  constructor(status: number, detail: unknown, message: string) {
+    super(message)
+    this.status = status
+    this.detail = detail
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${baseUrl}${path}`, {
     headers: { 'Content-Type': 'application/json' },
@@ -63,7 +75,17 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText)
-    throw new Error(`${res.status}: ${text}`)
+    let detail: unknown = text
+    try {
+      detail = (JSON.parse(text) as { detail?: unknown }).detail ?? text
+    } catch {
+      // not JSON
+    }
+    const msg =
+      typeof detail === 'string'
+        ? detail
+        : ((detail as { message?: string })?.message ?? text)
+    throw new ApiError(res.status, detail, `${res.status}: ${msg}`)
   }
   return res.json() as Promise<T>
 }
@@ -195,20 +217,24 @@ export const api = {
     req<{ suggestions: RelationSuggestion[] }>('/api/relations/suggestions'),
   familySuggestions: () =>
     req<{ suggestions: FamilySuggestion[] }>('/api/relations/family-suggestions'),
-  autoConnectRelations: (minShared: number) =>
+  /** Proposed links from photo co-occurrence. Read-only: saves nothing. */
+  autoConnectPreview: (minShared: number) =>
+    req<{ pairs: RelationSuggestion[] }>(`/api/relations/auto?min_shared=${minShared}`),
+  /** Save only the pairs the user confirmed. */
+  autoConnectConfirm: (pairs: { a: number; b: number }[], label = 'appears with') =>
     req<{ created: number }>('/api/relations/auto', {
       method: 'POST',
-      body: JSON.stringify({ min_shared: minShared })
+      body: JSON.stringify({ pairs, label })
     }),
-  addRelation: (personA: number, personB: number, label: string, directed = false) =>
+  addRelation: (input: RelationInput) =>
     req<{ relation: RelationEdge }>('/api/relations', {
       method: 'POST',
-      body: JSON.stringify({
-        person_a: personA,
-        person_b: personB,
-        label,
-        directed
-      })
+      body: JSON.stringify(input)
+    }),
+  updateRelation: (relId: number, input: RelationInput) =>
+    req<{ relation: RelationEdge }>(`/api/relations/${relId}`, {
+      method: 'PUT',
+      body: JSON.stringify(input)
     }),
   deleteRelation: (relId: number) =>
     req<{ ok: boolean }>(`/api/relations/${relId}`, { method: 'DELETE' }),

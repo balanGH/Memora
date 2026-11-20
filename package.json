@@ -1,7 +1,7 @@
 {
   "name": "memora",
   "version": "0.1.0",
-  "description": "Memora \u2014 a modern, fully offline, local photo management app",
+  "description": "Memora — a modern, fully offline, local photo management app",
   "author": "Memora",
   "license": "MIT",
   "main": "out/main/index.js",
@@ -15,6 +15,7 @@
     "backend:install": "node scripts/setup-backend.mjs",
     "backend:install-ai": "node scripts/setup-backend.mjs --ai",
     "backend:dev": "python backend/run.py",
+    "test": "vitest run",
     "test:backend": "node scripts/run-backend-tests.mjs"
   },
   "dependencies": {
@@ -38,6 +39,7 @@
     "electron": "^33.2.1",
     "electron-vite": "^2.3.0",
     "typescript": "^5.7.2",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "vitest": "^2.1.9"
   }
 }
