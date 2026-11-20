@@ -1,24 +1,25 @@
 """Watch Folders: continuously auto-ingest new media.
 
 A single background thread polls every folder marked ``watch = 1`` on an
-interval. New files (not already indexed) are indexed exactly like a manual
-scan — metadata + thumbnail — then AI processing is kicked off so they become
-searchable. Polling (rather than OS file events) keeps this dependency-free and
-cross-platform; ``_index_file`` skips paths already in the DB, so re-walking is
-cheap and idempotent.
+interval and runs the same indexing pass as a manual scan (new, changed,
+moved and missing files), then kicks off AI processing for new items.
+Polling (rather than OS file events) keeps this dependency-free and
+cross-platform; unchanged files cost one ``stat`` each.
+
+A sweep takes the scanner's lock without waiting: if a manual scan is running
+the sweep is skipped, so the two never index the same files at once.
 """
 from __future__ import annotations
 
 import threading
-import time
 from datetime import datetime
-from pathlib import Path
+from typing import Optional
 
 from . import ai_pipeline, scanner
-from .db import get_conn, transaction
+from .db import get_conn
 
 _INTERVAL = 15  # seconds between sweeps
-_thread: threading.Thread | None = None
+_thread: Optional[threading.Thread] = None
 _stop = threading.Event()
 
 STATUS = {
@@ -26,7 +27,12 @@ STATUS = {
     "watched": 0,
     "added_total": 0,
     "last_check": None,
+    "skipped_busy": 0,
 }
+
+
+def reset_state() -> None:
+    STATUS.update(running=False, watched=0, added_total=0, last_check=None, skipped_busy=0)
 
 
 def _watched_folders() -> list[dict]:
@@ -37,25 +43,26 @@ def _watched_folders() -> list[dict]:
     ]
 
 
-def _sweep() -> None:
+def _sweep() -> Optional[dict]:
+    """One pass over the watched folders. None if a scan held the lock."""
     folders = _watched_folders()
     STATUS["watched"] = len(folders)
-    added = 0
-    for f in folders:
-        root = Path(f["path"])
-        if not root.is_dir():
-            continue
-        for path in scanner._iter_media_files(root):
-            try:
-                with transaction() as conn:
-                    if scanner._index_file(conn, f["id"], path):
-                        added += 1
-            except Exception:
-                pass
-    if added:
-        STATUS["added_total"] += added
+    if not folders:
+        STATUS["last_check"] = datetime.now().isoformat()
+        return {"added": 0}
+    if not scanner._scan_lock.acquire(blocking=False):
+        STATUS["skipped_busy"] += 1
+        return None
+    try:
+        totals = scanner.scan_folders([f["id"] for f in folders], status=None, cancel=_stop)
+    finally:
+        scanner._scan_lock.release()
+    new = totals["added"] + totals["updated"]
+    if new:
+        STATUS["added_total"] += totals["added"]
         ai_pipeline.start_processing()  # enqueue AI for the new files
     STATUS["last_check"] = datetime.now().isoformat()
+    return totals
 
 
 def _loop() -> None:
@@ -64,13 +71,9 @@ def _loop() -> None:
         while not _stop.is_set():
             try:
                 _sweep()
-            except Exception:
-                pass
-            # Wake early if asked to stop.
-            for _ in range(_INTERVAL):
-                if _stop.is_set():
-                    break
-                time.sleep(1)
+            except Exception as e:  # never let the watcher thread die
+                print(f"[memora.watch] sweep failed: {type(e).__name__}")
+            _stop.wait(_INTERVAL)
     finally:
         STATUS["running"] = False
 
@@ -83,6 +86,16 @@ def start_watcher() -> None:
     _stop.clear()
     _thread = threading.Thread(target=_loop, daemon=True, name="memora-watch")
     _thread.start()
+
+
+def stop_watcher(timeout: float = 5.0) -> bool:
+    """Ask the watcher to stop and wait for it. True if it stopped."""
+    _stop.set()
+    t = _thread
+    if t is not None:
+        t.join(timeout)
+        return not t.is_alive()
+    return True
 
 
 def snapshot() -> dict:

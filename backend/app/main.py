@@ -2,30 +2,80 @@
 
 Serves the media index, thumbnails, originals, People/Search/Albums, and drives
 scanning + AI processing. Bound to localhost only; nothing is ever uploaded.
+
+Access control (A01): when launched by Electron, a per-launch secret arrives in
+``MEMORA_API_TOKEN`` and every request must carry it in ``X-Memora-Token``
+(Electron's main process adds the header; the renderer never sees it). Requests
+whose Host is not a loopback name are rejected (DNS rebinding), and CORS only
+admits the app's own origins.
 """
 from __future__ import annotations
 
+import hmac
 import mimetypes
+import os
+import sys
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 
-from . import ai_pipeline, repository, scanner, tiles, watcher
+from . import ai_pipeline, db, maintenance, repository, scanner, tiles, watcher
 from .ai import system_info
 from .ai.device import describe, detect_device
-from .config import HOST, PORT
+from .config import API_TOKEN, HOST, LOOPBACK_HOSTS, PORT, TOKEN_HEADER
 from .db import get_conn, init_db
 from .media_utils import crop_face, generate_display, is_web_safe
 
+_server = None  # uvicorn.Server, set by run() so shutdown can be requested
+_startup_report: dict = {}
+
+
+def shutdown_workers(timeout: float = 5.0) -> dict:
+    """Stop background work cleanly (B14): cancel scan + AI after the current
+    item, stop the watcher, wait for the threads, close every DB connection."""
+    scanner.cancel_scan()
+    ai_pipeline.cancel_processing()
+    stopped_watch = watcher.stop_watcher(timeout)
+    stopped_scan = scanner.wait(timeout)
+    stopped_ai = ai_pipeline.wait(timeout)
+    db.close_all(checkpoint=True)
+    return {"watcher": stopped_watch, "scan": stopped_scan, "ai": stopped_ai}
+
+
+def request_exit() -> None:
+    """Ask uvicorn to shut down gracefully (runs the lifespan shutdown)."""
+    if _server is not None:
+        _server.should_exit = True
+
+
+def _watch_parent_stdin() -> None:
+    """Exit when Electron's stdin pipe closes, i.e. the parent app died."""
+    try:
+        while sys.stdin and sys.stdin.buffer.read(1):
+            pass
+    except Exception:
+        pass
+    print("[memora] parent process gone; shutting down")
+    request_exit()
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    init_db()
+    _startup_report["migration"] = init_db()
+    # quick_check reads the whole DB: run it off the startup path.
+    threading.Thread(
+        target=lambda: _startup_report.__setitem__("integrity", db.integrity_report()),
+        daemon=True, name="memora-integrity",
+    ).start()
     watcher.start_watcher()
+    if os.environ.get("MEMORA_EXIT_ON_STDIN_EOF") == "1":
+        threading.Thread(target=_watch_parent_stdin, daemon=True, name="memora-parent").start()
     # Probe the hardware off the request path (spawns OS queries) so the first
     # /api/system call is instant and the choice shows up in the log at boot.
     threading.Thread(
@@ -34,24 +84,44 @@ async def _lifespan(_app: FastAPI):
         name="memora-hwprobe",
     ).start()
     yield
+    print(f"[memora] shutdown: {shutdown_workers()}")
 
 
-app = FastAPI(title="Memora", version="0.1.0", lifespan=_lifespan)
+app = FastAPI(title="Memora", version="0.2.0", lifespan=_lifespan)
 
 # Media bytes are addressed by numeric media id (/api/thumb/{id}, /api/display/{id}).
-# Because ids are reused when the library is rescanned/rebuilt, the same URL can
-# point to a different file over time. Without this header Chromium heuristically
-# caches the old image and shows a thumbnail that no longer matches the original.
 # "no-cache" forces revalidation on every request; FileResponse's ETag/Last-Modified
 # make that a cheap 304 when the file is unchanged.
 _REVALIDATE = {"Cache-Control": "no-cache"}
 
-# The renderer runs on a vite dev-server origin in dev and file:// in prod.
+
+def _host_name(host_header: str) -> str:
+    host = host_header.strip().lower()
+    if host.startswith("["):  # [::1]:8756
+        return host.split("]")[0] + "]"
+    return host.rsplit(":", 1)[0] if ":" in host else host
+
+
+@app.middleware("http")
+async def _access_control(request: Request, call_next):
+    # DNS-rebinding defence: only loopback Host names reach the API.
+    if _host_name(request.headers.get("host", "")) not in LOOPBACK_HOSTS:
+        return JSONResponse({"detail": "Forbidden host"}, status_code=403)
+    if API_TOKEN and request.method != "OPTIONS" and request.url.path != "/api/health":
+        supplied = request.headers.get(TOKEN_HEADER, "")
+        if not hmac.compare_digest(supplied.encode(), API_TOKEN.encode()):
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
+# The renderer runs on the electron-vite dev server (localhost) in dev and on
+# file:// (Origin "null") when packaged. Added last, so it wraps the auth
+# middleware and answers CORS preflights itself.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # localhost-only server; safe for a local desktop app
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origin_regex=r"^(null|file://.*|https?://(localhost|127\.0\.0\.1)(:\d+)?)$",
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", TOKEN_HEADER],
 )
 
 
@@ -120,6 +190,11 @@ def post_scan(body: ScanIn) -> dict:
     return {"started": started}
 
 
+@app.post("/api/scan/cancel")
+def post_scan_cancel() -> dict:
+    return {"ok": scanner.cancel_scan()}
+
+
 @app.get("/api/scan/status")
 def scan_status() -> dict:
     return {
@@ -128,9 +203,27 @@ def scan_status() -> dict:
     }
 
 
+@app.get("/api/scan/failures")
+def get_scan_failures() -> dict:
+    return {"failures": scanner.scan_failures()}
+
+
+@app.post("/api/scan/failures/retry")
+def post_scan_failures_retry() -> dict:
+    return {"started": scanner.retry_scan_failures()}
+
+
 @app.post("/api/ai/process")
 def post_process() -> dict:
     return {"started": ai_pipeline.start_processing()}
+
+
+@app.post("/api/ai/purge-stub")
+def post_purge_stub() -> dict:
+    try:
+        return {"removed": ai_pipeline.purge_stub_results()}
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 # -------------------------------------------------- Processing Center -------
@@ -166,6 +259,63 @@ def post_processing_action(action: str) -> dict:
     raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
 
 
+# ------------------------------------------------------- Maintenance --------
+
+@app.get("/api/maintenance/health")
+def get_maintenance_health() -> dict:
+    return {**maintenance.health_report(), "startup": _startup_report}
+
+
+@app.post("/api/maintenance/cleanup-cache")
+def post_cleanup_cache() -> dict:
+    return maintenance.cleanup_cache()
+
+
+def _require_idle() -> None:
+    if scanner.STATUS.running or ai_pipeline.STATUS["running"]:
+        raise HTTPException(status_code=409, detail="Wait for scanning / AI processing to finish")
+
+
+@app.post("/api/maintenance/repair")
+def post_repair() -> dict:
+    _require_idle()
+    return maintenance.repair()
+
+
+@app.get("/api/maintenance/backups")
+def get_backups() -> dict:
+    return {"backups": db.list_backups()}
+
+
+@app.post("/api/maintenance/backup")
+def post_backup() -> dict:
+    return {"backup": db.backup_database("manual").name}
+
+
+class RestoreIn(BaseModel):
+    name: str
+
+
+@app.post("/api/maintenance/restore")
+def post_restore(body: RestoreIn) -> dict:
+    _require_idle()
+    if not scanner._scan_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A scan is in progress")
+    try:
+        return db.restore_backup(body.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        scanner._scan_lock.release()
+
+
+@app.post("/api/admin/shutdown")
+def post_shutdown() -> dict:
+    """Graceful exit requested by the Electron main process on quit."""
+    request_exit()
+    return {"ok": True}
+
+
 # ------------------------------------------------------------- Privacy ------
 
 @app.get("/api/privacy")
@@ -179,12 +329,29 @@ def get_privacy() -> dict:
 def get_media_list(
     view: str = "photos", sort: str = "newest", limit: int = 200, offset: int = 0
 ) -> dict:
+    limit = max(1, min(limit, 20000))
+    offset = max(0, offset)
     return repository.list_media(view=view, sort=sort, limit=limit, offset=offset)
 
 
 @app.get("/api/media/timeline")
 def get_media_timeline(view: str = "photos", sort: str = "newest") -> dict:
     return {"months": repository.timeline(view=view, sort=sort)}
+
+
+@app.get("/api/media/missing")
+def get_missing() -> dict:
+    return {"items": scanner.missing_media()}
+
+
+class IdsIn(BaseModel):
+    media_ids: list[int] = Field(default_factory=list)
+
+
+@app.post("/api/media/missing/forget")
+def post_forget_missing(body: IdsIn) -> dict:
+    """Remove the listed missing items from the library (explicit action)."""
+    return {"removed": scanner.forget_missing(body.media_ids)}
 
 
 class BulkFlagIn(BaseModel):
@@ -213,8 +380,11 @@ def post_trash_empty() -> dict:
 
 
 @app.get("/api/duplicates")
-def get_duplicates() -> dict:
-    return {"groups": repository.duplicate_groups()}
+def get_duplicates(similar: bool = False) -> dict:
+    groups = repository.duplicate_groups()
+    if similar:
+        groups = groups + repository.near_duplicate_groups()
+    return {"groups": groups}
 
 
 @app.get("/api/media/{media_id}")
@@ -265,17 +435,18 @@ def delete_tag(media_id: int, tag_id: int) -> dict:
 @app.get("/api/thumb/{media_id}")
 def get_thumb(media_id: int):
     row = get_conn().execute(
-        "SELECT thumb_path, path FROM media WHERE id = ?", (media_id,)
+        "SELECT thumb_path, path, kind FROM media WHERE id = ?", (media_id,)
     ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
     thumb = row["thumb_path"]
     if thumb and Path(thumb).exists():
         return FileResponse(thumb, media_type="image/webp", headers=_REVALIDATE)
-    # fall back to original if thumbnail is missing
-    if row["path"] and Path(row["path"]).exists():
+    # Fall back to the original only when a browser can render it directly.
+    if row["kind"] == "image" and row["path"] and is_web_safe(Path(row["path"])) \
+            and Path(row["path"]).exists():
         return FileResponse(row["path"], headers=_REVALIDATE)
-    raise HTTPException(status_code=404, detail="File missing")
+    raise HTTPException(status_code=404, detail="Thumbnail unavailable")
 
 
 @app.get("/api/file/{media_id}")
@@ -312,7 +483,11 @@ def get_display(media_id: int):
         )
     jpeg = generate_display(path)
     if not jpeg:
-        raise HTTPException(status_code=415, detail="Cannot render this image")
+        from .media_utils import unsupported_reason
+
+        raise HTTPException(
+            status_code=415, detail=unsupported_reason(path) or "Cannot render this image"
+        )
     return FileResponse(jpeg, media_type="image/jpeg", headers=_REVALIDATE)
 
 
@@ -321,6 +496,24 @@ def get_display(media_id: int):
 @app.get("/api/people")
 def get_people(include_hidden: bool = False) -> dict:
     return {"people": repository.list_people(include_hidden=include_hidden)}
+
+
+@app.get("/api/people/review")
+def get_people_review() -> dict:
+    """Uncertain face matches awaiting manual confirmation."""
+    return {"faces": repository.uncertain_faces()}
+
+
+class AssignIn(BaseModel):
+    person_id: Optional[int] = None
+
+
+@app.post("/api/faces/{face_id}/assign")
+def post_assign_face(face_id: int, body: AssignIn) -> dict:
+    pid = repository.assign_face(face_id, body.person_id)
+    if pid is None:
+        raise HTTPException(status_code=404, detail="Face or person not found")
+    return {"person_id": pid}
 
 
 class RenameIn(BaseModel):
@@ -350,8 +543,13 @@ class MergeIn(BaseModel):
 
 @app.post("/api/people/merge")
 def post_merge(body: MergeIn) -> dict:
-    ok = repository.merge_people(body.source_id, body.target_id)
-    return {"ok": ok}
+    op_id = repository.merge_people(body.source_id, body.target_id)
+    return {"ok": op_id is not None, "op_id": op_id}
+
+
+@app.post("/api/people/merge/{op_id}/undo")
+def post_merge_undo(op_id: int) -> dict:
+    return {"ok": repository.undo_merge(op_id)}
 
 
 class SplitIn(BaseModel):
@@ -386,7 +584,7 @@ class ExportPersonIn(BaseModel):
 def post_export_person(body: ExportPersonIn) -> dict:
     try:
         return repository.export_person(body.person_id, body.dest)
-    except Exception as e:
+    except (ValueError, OSError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -493,7 +691,7 @@ def delete_relation(rel_id: int) -> dict:
 
 @app.get("/api/search")
 def get_search(q: str, limit: int = 200, person_id: int | None = None) -> dict:
-    return repository.search(q, limit=limit, person_id=person_id)
+    return repository.search(q, limit=max(1, min(limit, 2000)), person_id=person_id)
 
 
 @app.get("/api/search/suggest")
@@ -556,7 +754,10 @@ class AlbumIn(BaseModel):
 
 @app.post("/api/albums")
 def post_album(body: AlbumIn) -> dict:
-    return {"id": repository.create_album(body.name)}
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Album name can't be empty")
+    return {"id": repository.create_album(name)}
 
 
 class AlbumAddIn(BaseModel):
@@ -576,7 +777,16 @@ def get_album_media(album_id: int) -> dict:
 def run() -> None:
     import uvicorn
 
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    global _server
+    if HOST not in LOOPBACK_HOSTS and not API_TOKEN:
+        raise SystemExit(
+            f"Refusing to listen on non-loopback host {HOST!r} without MEMORA_API_TOKEN."
+        )
+    if not API_TOKEN:
+        print("[memora] WARNING: MEMORA_API_TOKEN not set; API auth disabled (dev mode, loopback only)")
+    config = uvicorn.Config(app, host=HOST, port=PORT, log_level="info")
+    _server = uvicorn.Server(config)
+    _server.run()
 
 
 if __name__ == "__main__":

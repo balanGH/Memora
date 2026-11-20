@@ -4,20 +4,27 @@ The rest of the app depends only on the ``Protocol`` interfaces defined in
 ``interfaces.py``. Swapping an implementation never touches any caller, only
 this factory.
 
-Face backend selection (``MEMORA_FACE_BACKEND``):
+Backend selection
+-----------------
 
-* ``auto`` (default): use InsightFace if it is installed, otherwise the
-  deterministic stub. The compute device is picked automatically: a GPU when
-  onnxruntime has a GPU provider for it (CUDA / DirectML / CoreML), else CPU.
-  See ``device.py``.
-* ``insightface`` / ``real``: require InsightFace (falls back to the stub with a
-  warning if it can't load).
-* ``stub``: never load models.
+``MEMORA_AI_BACKEND`` (all services):
 
-Install for real faces: ``pip install insightface opencv-python`` plus ONE
-onnxruntime build, chosen for your hardware:
-``onnxruntime-gpu`` (NVIDIA), ``onnxruntime-directml`` (any GPU on Windows) or
-``onnxruntime`` (CPU / Mac). ``npm run backend:install-ai`` does this for you.
+* ``auto`` (default): real models where installed, otherwise the service is
+  **disabled** (produces nothing). Never fabricates results.
+* ``stub``: deterministic fake models for every service (demos, UI work,
+  tests). Its output is labelled ``stub/v1`` and can be purged later.
+* ``none``: every service disabled.
+
+``MEMORA_FACE_BACKEND`` (faces only, overrides the above for faces):
+
+* ``auto`` (default): InsightFace if installed, else follow MEMORA_AI_BACKEND.
+* ``insightface`` / ``real``: require InsightFace (disabled, with the error
+  shown in the UI, if it can't load).
+* ``stub`` / ``none``: as above.
+
+Install for real faces: ``npm run backend:install-ai`` (InsightFace + the
+onnxruntime build that matches your GPU). Object detection, OCR and semantic
+search have no real model wired yet; see AI_SETUP.md.
 """
 from __future__ import annotations
 
@@ -26,13 +33,16 @@ import os
 import threading
 
 from .device import describe, detect_device
-from .interfaces import AIServices
+from .interfaces import AIServices, DisabledService
 from .stub import (
     StubEmbeddingService,
+    StubFaceService,
     StubOCRService,
     StubTaggingService,
-    build_stub_services,
 )
+
+STUB_MODEL = "stub/v1"
+INSIGHTFACE_MODEL = "insightface/buffalo_l"
 
 _services: AIServices | None = None
 _build_lock = threading.Lock()
@@ -42,35 +52,60 @@ def _insightface_installed() -> bool:
     return importlib.util.find_spec("insightface") is not None
 
 
+def _setting(name: str, default: str = "auto") -> str:
+    return os.environ.get(name, default).strip().lower() or default
+
+
 def _build() -> AIServices:
-    face_backend = os.environ.get("MEMORA_FACE_BACKEND", "auto").strip().lower()
-    want_real = face_backend in ("insightface", "real") or (
-        face_backend == "auto" and _insightface_installed()
+    ai_backend = _setting("MEMORA_AI_BACKEND")
+    face_backend = _setting("MEMORA_FACE_BACKEND")
+    errors: list[str] = []
+    disabled = DisabledService()
+
+    stub_all = ai_backend == "stub"
+    services = AIServices(
+        faces=disabled, tagging=disabled, ocr=disabled, embeddings=disabled,
+        face_model=None, tags_model=None, ocr_model=None, embed_model=None,
+        backend="none", providers=[], semantic_embeddings=False,
     )
 
+    # ---- faces
+    want_real = face_backend in ("insightface", "real") or (
+        face_backend == "auto" and ai_backend != "none" and _insightface_installed()
+    )
     if want_real:
         try:
             from .real import RealFaceService
 
             faces = RealFaceService()
-            # InsightFace normed embeddings: same person ≈ 0.45+. Override via
-            # MEMORA_FACE_THRESHOLD if you want it looser/tighter.
-            threshold = float(os.environ.get("MEMORA_FACE_THRESHOLD", "0.45"))
+            services.faces = faces
+            services.face_model = INSIGHTFACE_MODEL
+            # InsightFace normed embeddings: same person ≈ 0.45+.
+            services.face_match_threshold = float(os.environ.get("MEMORA_FACE_THRESHOLD", "0.45"))
+            services.backend = "insightface"
+            services.providers = list(faces.active_providers)
             print(f"[memora.ai] face backend: InsightFace, providers={faces.active_providers}")
-            return AIServices(
-                faces=faces,
-                tagging=StubTaggingService(),
-                ocr=StubOCRService(),
-                embeddings=StubEmbeddingService(),
-                face_match_threshold=threshold,
-                backend="insightface",
-                providers=list(faces.active_providers),
-            )
         except Exception as e:  # missing package / model download failure
-            print(f"[memora.ai] real face backend unavailable ({e}); using stub")
+            errors.append(f"Face recognition (InsightFace) failed to load: {type(e).__name__}: {e}")
+            print(f"[memora.ai] real face backend unavailable ({type(e).__name__})")
+    elif face_backend == "stub" or (face_backend == "auto" and stub_all):
+        services.faces = StubFaceService()
+        services.face_model = STUB_MODEL
+        services.face_match_threshold = 0.92
+        services.backend = "stub"
+        services.providers = ["CPUExecutionProvider"]
 
-    print("[memora.ai] face backend: stub")
-    return build_stub_services()
+    # ---- tagging / OCR / embeddings: only the stub exists today.
+    if stub_all:
+        services.tagging, services.tags_model = StubTaggingService(), STUB_MODEL
+        services.ocr, services.ocr_model = StubOCRService(), STUB_MODEL
+        services.embeddings, services.embed_model = StubEmbeddingService(), STUB_MODEL
+
+    if os.environ.get("MEMORA_FACE_THRESHOLD") and services.face_model:
+        services.face_match_threshold = float(os.environ["MEMORA_FACE_THRESHOLD"])
+    services.init_errors = errors
+    print(f"[memora.ai] models: {services.models()}")
+    return services
 
 
 def get_ai() -> AIServices:
@@ -84,6 +119,13 @@ def get_ai() -> AIServices:
     return _services
 
 
+def reset_services() -> None:
+    """Forget the built services (tests; settings changes)."""
+    global _services
+    with _build_lock:
+        _services = None
+
+
 def ai_loaded() -> bool:
     """True once models are built (avoids triggering a slow load just to report)."""
     return _services is not None
@@ -92,16 +134,22 @@ def ai_loaded() -> bool:
 def system_info() -> dict:
     """Hardware + backend status for the UI (GPU found, which one is used, hints)."""
     info = detect_device().to_dict()
-    face_backend = os.environ.get("MEMORA_FACE_BACKEND", "auto").strip().lower()
-    info["face_backend_setting"] = face_backend
+    info["face_backend_setting"] = _setting("MEMORA_FACE_BACKEND")
+    info["ai_backend_setting"] = _setting("MEMORA_AI_BACKEND")
     info["insightface_installed"] = _insightface_installed()
     if _services is not None:
         info["active_backend"] = _services.backend
         info["active_providers"] = list(_services.providers)
         # A GPU provider was requested but onnxruntime fell back to CPU.
         info["gpu_in_use"] = any(p != "CPUExecutionProvider" for p in _services.providers)
+        info["models"] = _services.models()
+        info["semantic_search"] = _services.semantic_embeddings
+        info["ai_init_errors"] = list(_services.init_errors)
     else:
         info["active_backend"] = None
         info["active_providers"] = []
         info["gpu_in_use"] = False
+        info["models"] = None
+        info["semantic_search"] = False
+        info["ai_init_errors"] = []
     return info

@@ -8,7 +8,7 @@ from typing import Literal, Optional
 
 from .ai import get_ai
 from .ai.interfaces import cosine_similarity
-from .db import get_conn, transaction
+from .db import PRUNE_EMPTY_PEOPLE_SQL, get_conn, transaction
 
 SortKey = Literal["newest", "oldest", "favorites", "added"]
 
@@ -18,6 +18,9 @@ _SORT_SQL = {
     "favorites": "is_favorite DESC, taken_at DESC",
     "added": "created_at DESC, id DESC",
 }
+
+PHASH_SIMILAR_MAX = 12   # bits of 64: "looks alike" (similar strip)
+PHASH_NEAR_DUP_MAX = 5   # bits of 64: near-duplicate (resized / re-encoded)
 
 # Which library "bucket" a media row belongs to.
 _VIEW_FILTER = {
@@ -31,7 +34,7 @@ _VIEW_FILTER = {
 
 def _media_dict(row) -> dict:
     d = dict(row)
-    for flag in ("is_favorite", "is_archived", "is_hidden", "is_trashed", "ai_processed"):
+    for flag in ("is_favorite", "is_archived", "is_hidden", "is_trashed", "ai_processed", "is_missing"):
         if flag in d:
             d[flag] = bool(d[flag])
     return d
@@ -53,7 +56,8 @@ def list_media(
 
     rows = conn.execute(
         f"""SELECT id, filename, kind, width, height, taken_at, thumb_path,
-                   is_favorite, is_archived, is_hidden, gps_lat, gps_lon
+                   is_favorite, is_archived, is_hidden, gps_lat, gps_lon, is_missing,
+                   taken_at_source, duration
             FROM media WHERE {where}
             ORDER BY {order} LIMIT ? OFFSET ?""",
         (limit, offset),
@@ -182,24 +186,24 @@ def empty_trash() -> int:
     Their paths go into ``excluded_paths`` so a rescan won't bring them back,
     and cached thumbnails / display renditions are cleaned up.
     """
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT id, path, thumb_path FROM media WHERE is_trashed = 1"
-    ).fetchall()
-    if not rows:
-        return 0
     from .media_utils import display_filename
     from .config import DISPLAY_DIR
 
+    # Select and delete in ONE transaction, by id: an item trashed in between
+    # can't be deleted without also being excluded and having its cache freed.
     with transaction() as tx:
+        rows = tx.execute(
+            "SELECT id, path, thumb_path FROM media WHERE is_trashed = 1"
+        ).fetchall()
+        if not rows:
+            return 0
         tx.executemany(
             "INSERT OR IGNORE INTO excluded_paths(path) VALUES (?)",
             [(r["path"],) for r in rows],
         )
-        tx.execute("DELETE FROM media WHERE is_trashed = 1")
+        tx.executemany("DELETE FROM media WHERE id = ?", [(r["id"],) for r in rows])
         tx.execute(
-            "DELETE FROM people WHERE id NOT IN "
-            "(SELECT DISTINCT person_id FROM faces WHERE person_id IS NOT NULL)"
+            PRUNE_EMPTY_PEOPLE_SQL
         )
     for r in rows:
         for cached in (r["thumb_path"], str(DISPLAY_DIR / display_filename(Path(r["path"])))):
@@ -236,6 +240,69 @@ def duplicate_groups(limit: int = 500) -> list[dict]:
     return out[:limit]
 
 
+def near_duplicate_groups(max_distance: int = PHASH_NEAR_DUP_MAX, limit: int = 300) -> list[dict]:
+    """Visually near-identical photos (resized, re-encoded, lightly edited).
+
+    Pigeonhole banding: the 64-bit dHash is split into 6 bands, so two hashes
+    within 5 bits share at least one band exactly. Only pairs sharing a band
+    are compared, which keeps this far below O(n^2) on large libraries.
+    Groups whose items are all byte-identical are left to ``duplicate_groups``.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT id, phash, file_hash FROM media
+           WHERE phash IS NOT NULL AND is_trashed = 0 AND kind = 'image'"""
+    ).fetchall()
+    bands = [(0, 11), (11, 22), (22, 33), (33, 44), (44, 54), (54, 64)]
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        while parent.get(x, x) != x:
+            parent[x] = parent.get(parent[x], parent[x])
+            x = parent[x]
+        return x
+
+    ints = {r["id"]: int(r["phash"], 16) for r in rows}
+    sha = {r["id"]: r["file_hash"] for r in rows}
+    for lo, hi in bands:
+        mask = ((1 << (hi - lo)) - 1) << lo
+        buckets: dict[int, list[int]] = {}
+        for mid, h in ints.items():
+            buckets.setdefault(h & mask, []).append(mid)
+        for ids in buckets.values():
+            if len(ids) < 2 or len(ids) > 2000:  # skip degenerate (blank) buckets
+                continue
+            for i, a in enumerate(ids):
+                for b in ids[i + 1:]:
+                    if find(a) != find(b) and bin(ints[a] ^ ints[b]).count("1") <= max_distance:
+                        parent[find(a)] = find(b)
+
+    groups: dict[int, list[int]] = {}
+    for mid in ints:
+        if mid in parent:
+            groups.setdefault(find(mid), []).append(mid)
+    out = []
+    for ids in groups.values():
+        if len(ids) < 2:
+            continue
+        if len({sha[i] for i in ids}) == 1 and sha[ids[0]]:
+            continue  # exact copies: shown by duplicate_groups
+        placeholders = ",".join("?" * len(ids))
+        items = [
+            _media_dict(r)
+            for r in conn.execute(
+                f"""SELECT id, filename, kind, width, height, taken_at, thumb_path,
+                           is_favorite, path, size_bytes, file_hash, phash
+                    FROM media WHERE id IN ({placeholders})
+                    ORDER BY is_favorite DESC, width * height DESC, taken_at ASC""",
+                ids,
+            )
+        ]
+        out.append({"hash": f"near-{min(ids)}", "items": items, "kind": "similar"})
+    out.sort(key=lambda g: len(g["items"]), reverse=True)
+    return out[:limit]
+
+
 def timeline(view: str = "photos", sort: str = "newest") -> list[dict]:
     """Month buckets in list order, each with the offset of its first item.
 
@@ -259,6 +326,18 @@ def timeline(view: str = "photos", sort: str = "newest") -> list[dict]:
     return out
 
 
+def _stub_filter(ai=None) -> str:
+    """SQL condition hiding placeholder (stub) tags unless the stub is active.
+
+    Libraries processed before AI versioning contain fabricated stub tags;
+    they must not drive search results once real/disabled models are in use.
+    """
+    ai = ai or get_ai()
+    if "stub/v1" in ai.models().values():
+        return "1"
+    return "(model IS NULL OR model NOT LIKE 'stub/%')"
+
+
 def search_suggestions(query: str, limit: int = 6) -> dict:
     """Quick matches for the search box: people names and tag labels."""
     q = query.strip().lower()
@@ -280,10 +359,10 @@ def search_suggestions(query: str, limit: int = 6) -> dict:
     tags = [
         dict(r)
         for r in conn.execute(
-            """SELECT LOWER(label) AS label, COUNT(DISTINCT media_id) AS count
+            f"""SELECT LOWER(label) AS label, COUNT(DISTINCT media_id) AS count
                FROM tags
                WHERE kind IN ('object', 'scene', 'pet', 'user')
-                 AND LOWER(label) LIKE ? ESCAPE '\\'
+                 AND LOWER(label) LIKE ? ESCAPE '\\' AND {_stub_filter()}
                GROUP BY LOWER(label) ORDER BY count DESC LIMIT ?""",
             (like, limit),
         ).fetchall()
@@ -346,22 +425,39 @@ def set_person_cover(person_id: int, media_id: int) -> bool:
     return True
 
 
-def merge_people(source_id: int, target_id: int) -> bool:
-    """Reassign all faces from source person to target, then delete source."""
+def merge_people(source_id: int, target_id: int) -> Optional[int]:
+    """Reassign all faces from source person to target, then delete source.
+
+    Every change is journaled in ``operations`` so the merge can be undone
+    exactly (B32). Returns the operation id, or None if nothing to merge.
+    """
     if source_id == target_id:
-        return False
+        return None
     with transaction() as conn:
+        source = conn.execute("SELECT * FROM people WHERE id = ?", (source_id,)).fetchone()
+        target = conn.execute("SELECT * FROM people WHERE id = ?", (target_id,)).fetchone()
+        if source is None or target is None:
+            return None
+        face_ids = [r["id"] for r in conn.execute(
+            "SELECT id FROM faces WHERE person_id = ?", (source_id,))]
+        rels = [dict(r) for r in conn.execute(
+            "SELECT * FROM relationships WHERE person_a = ? OR person_b = ?",
+            (source_id, source_id))]
+        journal = {
+            "source": dict(source),
+            "target_id": target_id,
+            "target_cover": target["cover_media_id"],
+            "face_ids": face_ids,
+            "relationships": rels,
+        }
+
         conn.execute(
             "UPDATE faces SET person_id = ? WHERE person_id = ?", (target_id, source_id)
         )
         # Re-point the source's relationships at the target instead of letting
         # ON DELETE CASCADE silently drop them. Skip links that would become
         # self-links or duplicate a link the target already has.
-        for rel in conn.execute(
-            "SELECT id, person_a, person_b, label, directed FROM relationships "
-            "WHERE person_a = ? OR person_b = ?",
-            (source_id, source_id),
-        ).fetchall():
+        for rel in rels:
             a = target_id if rel["person_a"] == source_id else rel["person_a"]
             b = target_id if rel["person_b"] == source_id else rel["person_b"]
             if a == b:
@@ -385,10 +481,131 @@ def merge_people(source_id: int, target_id: int) -> bool:
             (source_id, target_id),
         )
         conn.execute("DELETE FROM people WHERE id = ?", (source_id,))
+        op_id = conn.execute(
+            "INSERT INTO operations(kind, payload) VALUES ('merge_people', ?)",
+            (json.dumps(journal),),
+        ).lastrowid
+    from .ai_pipeline import invalidate_person_index
+
+    invalidate_person_index()
+    return op_id
+
+
+def undo_merge(op_id: int) -> bool:
+    """Exactly reverse a merge recorded by ``merge_people``.
+
+    Faces that no longer exist (e.g. their photo was re-indexed) are skipped;
+    everything else (the person row with the same id, name, hidden flag and
+    cover, its faces and its relationships) is restored.
+    """
+    with transaction() as conn:
+        op = conn.execute(
+            "SELECT payload, undone_at FROM operations WHERE id = ? AND kind = 'merge_people'",
+            (op_id,),
+        ).fetchone()
+        if op is None or op["undone_at"] is not None:
+            return False
+        j = json.loads(op["payload"])
+        src = j["source"]
+        if conn.execute("SELECT 1 FROM people WHERE id = ?", (src["id"],)).fetchone():
+            return False
+        cover = src.get("cover_media_id")
+        if cover is not None and not conn.execute(
+            "SELECT 1 FROM media WHERE id = ?", (cover,)
+        ).fetchone():
+            cover = None
+        conn.execute(
+            "INSERT INTO people(id, name, cover_media_id, is_hidden, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (src["id"], src["name"], cover, src["is_hidden"], src["created_at"]),
+        )
+        if j["face_ids"]:
+            placeholders = ",".join("?" * len(j["face_ids"]))
+            conn.execute(
+                f"UPDATE faces SET person_id = ? WHERE id IN ({placeholders})",
+                (src["id"], *j["face_ids"]),
+            )
+        for rel in j["relationships"]:
+            exists = conn.execute(
+                "SELECT 1 FROM relationships WHERE id = ?", (rel["id"],)
+            ).fetchone()
+            if exists:
+                conn.execute(
+                    "UPDATE relationships SET person_a = ?, person_b = ? WHERE id = ?",
+                    (rel["person_a"], rel["person_b"], rel["id"]),
+                )
+            else:
+                conn.execute(
+                    "INSERT OR IGNORE INTO relationships(id, person_a, person_b, label, "
+                    "directed, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (rel["id"], rel["person_a"], rel["person_b"], rel["label"],
+                     rel["directed"], rel["created_at"]),
+                )
+        conn.execute(
+            "UPDATE people SET cover_media_id = ? WHERE id = ?",
+            (j["target_cover"], j["target_id"]),
+        )
+        conn.execute(
+            "UPDATE operations SET undone_at = datetime('now') WHERE id = ?", (op_id,)
+        )
     from .ai_pipeline import invalidate_person_index
 
     invalidate_person_index()
     return True
+
+
+def uncertain_faces(limit: int = 200) -> list[dict]:
+    """Face-to-person assignments that barely passed the match threshold.
+
+    Listed for manual review (B31): the user confirms or moves them.
+    """
+    ai = get_ai()
+    if not ai.face_model:
+        return []
+    upper = ai.face_match_threshold + ai.face_review_margin
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT f.id AS face_id, f.media_id, f.person_id, f.match_score, p.name,
+                  m.thumb_path
+           FROM faces f JOIN people p ON p.id = f.person_id
+           JOIN media m ON m.id = f.media_id
+           WHERE f.model = ? AND f.match_score IS NOT NULL AND f.match_score < ?
+             AND m.is_trashed = 0
+           ORDER BY f.match_score ASC LIMIT ?""",
+        (ai.face_model, upper, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def assign_face(face_id: int, person_id: Optional[int]) -> Optional[int]:
+    """Manual correction: move one face to ``person_id`` (None = a new person).
+
+    The face is marked as confirmed (match_score = 1) so it leaves the review
+    list. Returns the person id the face now belongs to.
+    """
+    with transaction() as conn:
+        face = conn.execute(
+            "SELECT id, person_id FROM faces WHERE id = ?", (face_id,)
+        ).fetchone()
+        if face is None:
+            return None
+        if person_id is None:
+            person_id = conn.execute("INSERT INTO people(name) VALUES (NULL)").lastrowid
+        elif not conn.execute("SELECT 1 FROM people WHERE id = ?", (person_id,)).fetchone():
+            return None
+        conn.execute(
+            "UPDATE faces SET person_id = ?, match_score = 1.0 WHERE id = ?",
+            (person_id, face_id),
+        )
+        conn.execute(
+            "UPDATE people SET cover_media_id = (SELECT media_id FROM faces WHERE id = ?) "
+            "WHERE id = ? AND cover_media_id IS NULL",
+            (face_id, person_id),
+        )
+    from .ai_pipeline import invalidate_person_index
+
+    invalidate_person_index()
+    return person_id
 
 
 def split_person(person_id: int, media_ids: list[int]) -> Optional[int]:
@@ -403,14 +620,22 @@ def split_person(person_id: int, media_ids: list[int]) -> Optional[int]:
     with transaction() as conn:
         new_id = conn.execute("INSERT INTO people (name) VALUES (NULL)").lastrowid
         placeholders = ",".join("?" * len(media_ids))
-        moved = conn.execute(
+        moved_media = [
+            r["media_id"]
+            for r in conn.execute(
+                f"""SELECT DISTINCT media_id FROM faces
+                    WHERE person_id = ? AND media_id IN ({placeholders})""",
+                (person_id, *media_ids),
+            )
+        ]
+        if not moved_media:
+            conn.execute("DELETE FROM people WHERE id = ?", (new_id,))
+            return None
+        conn.execute(
             f"""UPDATE faces SET person_id = ?
                 WHERE person_id = ? AND media_id IN ({placeholders})""",
             (new_id, person_id, *media_ids),
-        ).rowcount
-        if moved == 0:
-            conn.execute("DELETE FROM people WHERE id = ?", (new_id,))
-            return None
+        )
         # If the source's chosen cover moved out, clear it (crop falls back to
         # the largest remaining face).
         conn.execute(
@@ -418,9 +643,10 @@ def split_person(person_id: int, media_ids: list[int]) -> Optional[int]:
                 WHERE id = ? AND cover_media_id IN ({placeholders})""",
             (person_id, *media_ids),
         )
+        # Cover = a photo whose face actually moved (A25).
         conn.execute(
             "UPDATE people SET cover_media_id = ? WHERE id = ?",
-            (media_ids[0], new_id),
+            (moved_media[0], new_id),
         )
     from .ai_pipeline import invalidate_person_index
 
@@ -459,10 +685,13 @@ def search(query: str, limit: int = 200, person_id: Optional[int] = None) -> dic
     def bump(mid: int, amount: float):
         scores[mid] = scores.get(mid, 0.0) + amount
 
-    # 1. Tag matches (object / scene / pet / ocr)
+    ai = get_ai()
+
+    # 1. Tag matches (object / scene / pet / ocr / user)
     for row in conn.execute(
-        """SELECT media_id, kind, label, confidence FROM tags
-           WHERE kind != 'embedding' AND LOWER(label) LIKE ? ESCAPE '\\'""",
+        f"""SELECT media_id, kind, label, confidence FROM tags
+           WHERE kind != 'embedding' AND LOWER(label) LIKE ? ESCAPE '\\'
+             AND {_stub_filter(ai)}""",
         (like,),
     ).fetchall():
         weight = 2.0 if row["kind"] in ("object", "pet") else 1.5
@@ -476,18 +705,21 @@ def search(query: str, limit: int = 200, person_id: Optional[int] = None) -> dic
     ).fetchall():
         bump(row["media_id"], 3.0)
 
-    # 3. Semantic similarity via CLIP-style embedding
-    query_vec = get_ai().embeddings.embed_text(q)
-    for row in conn.execute(
-        "SELECT media_id, label FROM tags WHERE kind = 'embedding'"
-    ).fetchall():
-        try:
-            vec = json.loads(row["label"])
-        except (json.JSONDecodeError, TypeError):
-            continue
-        sim = cosine_similarity(query_vec, vec)
-        if sim > 0.15:
-            bump(row["media_id"], sim)
+    # 3. Semantic similarity, only with a real image-text model: stub hash
+    #    vectors are meaningless and matched ~1 in 9 photos at random.
+    if ai.semantic_embeddings and ai.embed_model:
+        query_vec = ai.embeddings.embed_text(q)
+        for row in conn.execute(
+            "SELECT media_id, label FROM tags WHERE kind = 'embedding' AND model = ?",
+            (ai.embed_model,),
+        ):
+            try:
+                vec = json.loads(row["label"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            sim = cosine_similarity(query_vec, vec)
+            if sim > 0.2:
+                bump(row["media_id"], sim)
 
     if not scores:
         return {"query": query, "items": []}
@@ -517,12 +749,10 @@ def search(query: str, limit: int = 200, person_id: Optional[int] = None) -> dic
     return {"query": query, "items": items}
 
 
-def similar_media(media_id: int, limit: int = 60) -> list[dict]:
-    """Find visually similar media via CLIP embedding cosine similarity."""
-    conn = get_conn()
+def _similar_by_embedding(conn, media_id: int, model: str, limit: int) -> list[int]:
     base = conn.execute(
-        "SELECT label FROM tags WHERE media_id = ? AND kind = 'embedding'",
-        (media_id,),
+        "SELECT label FROM tags WHERE media_id = ? AND kind = 'embedding' AND model = ?",
+        (media_id, model),
     ).fetchone()
     if not base:
         return []
@@ -530,20 +760,52 @@ def similar_media(media_id: int, limit: int = 60) -> list[dict]:
         base_vec = json.loads(base["label"])
     except (json.JSONDecodeError, TypeError):
         return []
-
     scored: list[tuple[int, float]] = []
     for row in conn.execute(
-        "SELECT media_id, label FROM tags WHERE kind = 'embedding' AND media_id != ?",
-        (media_id,),
-    ).fetchall():
+        "SELECT media_id, label FROM tags WHERE kind = 'embedding' AND model = ? "
+        "AND media_id != ?",
+        (model, media_id),
+    ):
         try:
             vec = json.loads(row["label"])
         except (json.JSONDecodeError, TypeError):
             continue
         scored.append((row["media_id"], cosine_similarity(base_vec, vec)))
-
     scored.sort(key=lambda t: t[1], reverse=True)
-    top = [mid for mid, _ in scored[:limit]]
+    return [mid for mid, _ in scored[:limit]]
+
+
+def _similar_by_phash(conn, media_id: int, limit: int) -> list[int]:
+    from .media_utils import hamming
+
+    base = conn.execute("SELECT phash FROM media WHERE id = ?", (media_id,)).fetchone()
+    if not base or not base["phash"]:
+        return []
+    scored = []
+    for row in conn.execute(
+        "SELECT id, phash FROM media WHERE phash IS NOT NULL AND id != ? AND is_trashed = 0",
+        (media_id,),
+    ):
+        d = hamming(base["phash"], row["phash"])
+        if d <= PHASH_SIMILAR_MAX:
+            scored.append((d, row["id"]))
+    scored.sort()
+    return [mid for _, mid in scored[:limit]]
+
+
+def similar_media(media_id: int, limit: int = 60) -> list[dict]:
+    """Visually similar media.
+
+    With a real image embedding model: cosine similarity in that model's
+    space. Otherwise: perceptual-hash (dHash) distance, which finds the same
+    scene / near-identical shots (bursts, edits, re-saves).
+    """
+    conn = get_conn()
+    ai = get_ai()
+    if ai.semantic_embeddings and ai.embed_model:
+        top = _similar_by_embedding(conn, media_id, ai.embed_model, limit)
+    else:
+        top = _similar_by_phash(conn, media_id, limit)
     if not top:
         return []
     placeholders = ",".join("?" * len(top))
@@ -665,13 +927,22 @@ def geotagged_media(limit: int = 5000, sort: str = "newest") -> list[dict]:
 
 
 def media_for_place(key: str, limit: int = 500) -> list[dict]:
+    """Media in one place cell (see ``_place_key``). Filters by the cell's
+    lat/lon bounds in SQL (indexed) instead of scanning every geotagged row."""
+    try:
+        lat_s, lon_s = key.split("_")
+        lat_c, lon_c = float(lat_s), float(lon_s)
+    except ValueError:
+        return []
+    half = 0.5 * 10 ** (-_PLACE_PRECISION) + 1e-9
     conn = get_conn()
     rows = conn.execute(
         """SELECT id, filename, kind, width, height, taken_at, thumb_path,
                   is_favorite, gps_lat, gps_lon
            FROM media
-           WHERE gps_lat IS NOT NULL AND gps_lon IS NOT NULL AND is_trashed = 0
-           ORDER BY taken_at DESC"""
+           WHERE gps_lat BETWEEN ? AND ? AND gps_lon BETWEEN ? AND ? AND is_trashed = 0
+           ORDER BY taken_at DESC""",
+        (lat_c - half, lat_c + half, lon_c - half, lon_c + half),
     ).fetchall()
     matched = [
         _media_dict(r)
@@ -944,11 +1215,13 @@ def processing_stats() -> dict:
     images = one("SELECT COUNT(*) FROM media WHERE kind = 'image' AND is_trashed = 0")
     videos = one("SELECT COUNT(*) FROM media WHERE kind = 'video' AND is_trashed = 0")
     dupes = one(
-        """SELECT COUNT(*) FROM media WHERE file_hash IN (
+        """SELECT COUNT(*) FROM media WHERE is_trashed = 0 AND file_hash IN (
                SELECT file_hash FROM media
-               WHERE file_hash IS NOT NULL GROUP BY file_hash HAVING COUNT(*) > 1
+               WHERE file_hash IS NOT NULL AND is_trashed = 0
+               GROUP BY file_hash HAVING COUNT(*) > 1
            )"""
     )
+    from .ai_pipeline import pending_count, stub_result_counts
     return {
         "total": total,
         "images": images,
@@ -962,6 +1235,11 @@ def processing_stats() -> dict:
         "ai_processed": one("SELECT COUNT(*) FROM media WHERE ai_processed = 1"),
         "failed": one("SELECT COUNT(*) FROM media WHERE ai_error IS NOT NULL"),
         "duplicates": dupes,
+        "missing": one("SELECT COUNT(*) FROM media WHERE is_missing = 1"),
+        "scan_failures": one("SELECT COUNT(*) FROM scan_failures"),
+        "ai_pending": pending_count(),
+        "stub_results": stub_result_counts(),
+        "models": get_ai().models(),
     }
 
 
@@ -995,12 +1273,13 @@ def privacy_info() -> dict:
     from .ai import system_info
 
     sysinfo = system_info()
-    real = sysinfo["active_backend"] == "insightface" or (
-        sysinfo["active_backend"] is None
-        and sysinfo["insightface_installed"]
-        and sysinfo["face_backend_setting"] != "stub"
-    )
+    models = get_ai().models()
+    active = {k: v for k, v in models.items() if v}
     device = "GPU" if sysinfo["is_gpu"] else "CPU"
+    if not active:
+        label = "None installed (AI features off)"
+    else:
+        label = ", ".join(f"{k}: {v}" for k, v in active.items()) + f" ({device})"
     tile_stats = tiles.cache_stats()
 
     def file_bytes(p: Path) -> int:
@@ -1011,7 +1290,7 @@ def privacy_info() -> dict:
 
     return {
         "local_ai": True,
-        "ai_backend": f"InsightFace (real, {device})" if real else "Stub (deterministic)",
+        "ai_backend": label,
         "compute": sysinfo,
         "uploads_enabled": False,
         "cloud_services": [],
@@ -1043,6 +1322,36 @@ def set_folder_watch(folder_id: int, watch: bool) -> bool:
 
 # ---------------------------------------------------------------- Export ----
 
+def _unique_target(target: Path) -> Path:
+    """``target`` if free, else ``name (1).ext``, ``name (2).ext`` …"""
+    if not target.exists():
+        return target
+    n = 1
+    while True:
+        cand = target.with_name(f"{target.stem} ({n}){target.suffix}")
+        if not cand.exists():
+            return cand
+        n += 1
+
+
+def _safe_copy(src: Path, target: Path) -> Path:
+    """Copy without ever overwriting: temp file + exclusive rename."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target = _unique_target(target)
+    tmp = target.with_name(f".{target.name}.memora-tmp")
+    shutil.copy2(src, tmp)
+    try:
+        # os.link/rename semantics differ per OS; re-check right before the
+        # rename and pick a new name if something appeared meanwhile.
+        if target.exists():
+            target = _unique_target(target)
+        tmp.replace(target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return target
+
+
 def export_person(person_id: int, dest: str) -> dict:
     """Copy all of a person's photos to ``dest``, mirroring their original
     folder structure relative to each photo's library root.
@@ -1054,13 +1363,23 @@ def export_person(person_id: int, dest: str) -> dict:
         dest/Events/college/IndustrialVisit/x.jpg
         dest/Events/college/Symposium/y.jpg
 
-    so the person's appearances are preserved under each event folder.
+    Safety (B01): existing files are never overwritten (a free name like
+    ``x (1).jpg`` is used), and the destination may not be inside a library
+    folder or Memora's data directory, so originals can't be clobbered.
     """
-    conn = get_conn()
-    dest_root = Path(dest).expanduser()
-    if not dest_root.exists():
-        dest_root.mkdir(parents=True, exist_ok=True)
+    from .scanner import path_in_data_dir, path_in_library
 
+    dest_root = Path(dest).expanduser()
+    if not dest_root.is_absolute():
+        raise ValueError("Export destination must be an absolute path")
+    lib = path_in_library(dest_root)
+    if lib:
+        raise ValueError(f"Choose a folder outside your library ({lib})")
+    if path_in_data_dir(dest_root):
+        raise ValueError("Choose a folder outside Memora's data directory")
+    dest_root.mkdir(parents=True, exist_ok=True)
+
+    conn = get_conn()
     rows = conn.execute(
         """SELECT DISTINCT m.path AS path, fo.path AS root
            FROM media m
@@ -1070,7 +1389,7 @@ def export_person(person_id: int, dest: str) -> dict:
         (person_id,),
     ).fetchall()
 
-    exported, skipped = 0, 0
+    exported, skipped, renamed = 0, 0, 0
     for r in rows:
         src = Path(r["path"])
         if not src.exists():
@@ -1082,14 +1401,15 @@ def export_person(person_id: int, dest: str) -> dict:
         except ValueError:
             rel = Path(src.name)
         target = dest_root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.copy2(src, target)
+            written = _safe_copy(src, target)
             exported += 1
+            if written != target:
+                renamed += 1
         except Exception:
             skipped += 1
 
-    return {"exported": exported, "skipped": skipped, "dest": str(dest_root)}
+    return {"exported": exported, "skipped": skipped, "renamed": renamed, "dest": str(dest_root)}
 
 
 def library_stats() -> dict:

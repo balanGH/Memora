@@ -98,6 +98,7 @@ class RealFaceService:
                     embedding=f.normed_embedding.astype(float).tolist(),
                     age=float(age) if age is not None else None,
                     gender=gender,
+                    score=float(getattr(f, "det_score", 0.0) or 0.0) or None,
                 )
             )
         return results
